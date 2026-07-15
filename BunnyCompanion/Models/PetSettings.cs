@@ -3,7 +3,7 @@ namespace BunnyCompanion.Models;
 public sealed class PetSettings
 {
     public string PetName { get; set; } = "小申";
-    public string PartnerName { get; set; } = "宝贝";
+    public string PartnerName { get; set; } = "宝宝";
     public double Scale { get; set; } = 1.0;
     public bool AlwaysOnTop { get; set; } = true;
     public bool AutoWalk { get; set; } = true;
@@ -48,7 +48,10 @@ public sealed class PetSettings
         PetName = string.IsNullOrWhiteSpace(PetName) ? "小申" : PetName.Trim();
         if (PetName.Length > 20)
             PetName = PetName[..20];
-        PartnerName = string.IsNullOrWhiteSpace(PartnerName) ? "宝贝" : PartnerName.Trim();
+        PartnerName = string.IsNullOrWhiteSpace(PartnerName) ? "宝宝" : PartnerName.Trim();
+        // 历史默认「宝贝」迁移为「宝宝」
+        if (PartnerName == "宝贝")
+            PartnerName = "宝宝";
         if (PartnerName.Length > 20)
             PartnerName = PartnerName[..20];
         Scale = Math.Clamp(Scale, 0.65, 1.50);

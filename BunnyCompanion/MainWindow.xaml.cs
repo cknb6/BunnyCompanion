@@ -39,6 +39,8 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _reminderTimer = new() { Interval = TimeSpan.FromSeconds(30) };
     private readonly DispatcherTimer _fullscreenTimer = new() { Interval = TimeSpan.FromSeconds(2) };
     private readonly DispatcherTimer _focusTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    /// <summary>定期自愈：穿透残留 / 拖拽卡死 / 透明度动画卡住导致点不上。</summary>
+    private readonly DispatcherTimer _inputHealTimer = new() { Interval = TimeSpan.FromSeconds(1.2) };
 
     private PetSettings _settings;
     private PetActionDefinition _currentAction = PetActionCatalog.Get("idle");
@@ -55,6 +57,7 @@ public partial class MainWindow : Window
     private double _dragStartLeft;
     private double _dragStartTop;
     private bool _isExiting;
+    private bool _isUninstalling;
     private bool _initialized;
     private bool _introDone;
     private bool _introPlaying;
@@ -81,6 +84,12 @@ public partial class MainWindow : Window
     private ChatWindow? _chatWindow;
     private int _rapidClickCount;
     private DateTime _lastRapidClickAt = DateTime.MinValue;
+    /// <summary>拖拽开始时间，超时仍未松手则强制结束，避免永久捕获鼠标。</summary>
+    private DateTime _dragStartedAt = DateTime.MinValue;
+    private double _dragLastDeltaX;
+    private double _dragLastDeltaY;
+    private string? _lastMouseReactionAction;
+    private DateTime _lastPersonBubbleAt = DateTime.MinValue;
 
     private bool IsFocusActive => _focusEnd is { } end && end > DateTime.Now;
     private bool IsExclusiveBusy => DateTime.Now < _exclusiveUntil || _isDragging || _introPlaying;
@@ -101,6 +110,7 @@ public partial class MainWindow : Window
         _reminderTimer.Tick += ReminderTimer_Tick;
         _fullscreenTimer.Tick += FullscreenTimer_Tick;
         _focusTimer.Tick += FocusTimer_Tick;
+        _inputHealTimer.Tick += InputHealTimer_Tick;
     }
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -117,17 +127,33 @@ public partial class MainWindow : Window
 
         // 全屏检测始终运行；行为/提醒在 intro 结束后再启动，避免隐藏动画空转。
         _fullscreenTimer.Start();
+        _inputHealTimer.Start();
 
         Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() =>
         {
-            NativeWindowService.SetClickThrough(this, _settings.ClickThrough);
+            ApplyClickThroughState(force: true);
             var startedWithWindows = _arguments.Any(argument =>
                 argument.Equals("--startup", StringComparison.OrdinalIgnoreCase));
             var quietStartup = startedWithWindows || IsQuietNow();
+            // intro 动画若异常未回调，仍强制启动行为定时器，避免永不散步
+            var introWatchdog = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+            introWatchdog.Tick += (_, _) =>
+            {
+                introWatchdog.Stop();
+                if (!_introDone)
+                {
+                    _introPlaying = false;
+                    _introDone = true;
+                    Opacity = 1;
+                }
+                EnsureBehaviorTimersRunning();
+            };
+            introWatchdog.Start();
+
             PlayStartupAnimation(fancy: !quietStartup, () =>
             {
-                _reminderTimer.Start();
-                _behaviorTimer.Start();
+                introWatchdog.Stop();
+                EnsureBehaviorTimersRunning();
                 if (!_settings.HasCompletedFirstRun)
                 {
                     _settings.HasCompletedFirstRun = true;
@@ -190,9 +216,13 @@ public partial class MainWindow : Window
         {
             _introPlaying = false;
             _introDone = true;
+            // 清掉 Opacity 动画时钟，避免之后 Opacity=1 写不进去导致“看得见但点不上”
+            BeginAnimation(OpacityProperty, null);
             Opacity = 1;
             IntroScale.ScaleX = IntroScale.ScaleY = 1;
             IntroOffset.Y = 0;
+            PetRoot.IsHitTestVisible = true;
+            ApplyClickThroughState(force: true);
             if (fancy)
                 PlayAction("jump", exclusiveSeconds: 1.2);
             completed?.Invoke();
@@ -221,8 +251,21 @@ public partial class MainWindow : Window
         }
 
         if (IsLoaded)
-            NativeWindowService.SetClickThrough(this, _settings.ClickThrough);
+            ApplyClickThroughState(force: true);
         UpdateTrayChecks();
+    }
+
+    /// <summary>
+    /// 统一设置穿透：同时写 Win32 WS_EX_TRANSPARENT 与内部标志，避免只改设置未改 HWND。
+    /// </summary>
+    private void ApplyClickThroughState(bool force = false)
+    {
+        if (!IsLoaded || _isExiting)
+            return;
+        NativeWindowService.SetClickThrough(this, _settings.ClickThrough);
+        // 非穿透时强制去掉可能残留的透明扩展样式
+        if (!_settings.ClickThrough)
+            NativeWindowService.EnsureClickThroughOff(this);
     }
 
     private void RestoreOrPlaceWindow()
@@ -328,7 +371,18 @@ public partial class MainWindow : Window
         if (message != WmNcHitTest)
             return IntPtr.Zero;
 
-        if (_settings.ClickThrough || _hiddenForFullscreen || Opacity < 0.01)
+        // 拖拽中始终接收命中，避免松手前被当成穿透
+        if (_isDragging)
+            return IntPtr.Zero;
+
+        if (_settings.ClickThrough || _hiddenForFullscreen || _manuallyHidden || !IsVisible)
+        {
+            handled = true;
+            return new IntPtr(HtTransparent);
+        }
+
+        // 入场/全屏恢复后 Opacity 可能仍被动画时钟卡住读到极小值：用实际可见状态判断
+        if (!PetRoot.IsHitTestVisible || (Opacity < 0.05 && !_introPlaying))
         {
             handled = true;
             return new IntPtr(HtTransparent);
@@ -337,8 +391,18 @@ public partial class MainWindow : Window
         var packed = lParam.ToInt64();
         var screenX = unchecked((short)(packed & 0xFFFF));
         var screenY = unchecked((short)((packed >> 16) & 0xFFFF));
-        var windowPoint = PointFromScreen(new Point(screenX, screenY));
-        if (IsOpaqueSpritePoint(windowPoint))
+        Point windowPoint;
+        try
+        {
+            windowPoint = PointFromScreen(new Point(screenX, screenY));
+        }
+        catch
+        {
+            // 多屏 DPI 偶发失败时不要整窗穿透，交给默认命中
+            return IntPtr.Zero;
+        }
+
+        if (IsOpaqueSpritePoint(windowPoint) || IsSoftBodyHit(windowPoint))
             return IntPtr.Zero;
 
         handled = true;
@@ -360,11 +424,25 @@ public partial class MainWindow : Window
         }
         catch
         {
-            return false;
+            // 变换失败时用 Image 布局矩形兜底，避免整只宠点不中
+            try
+            {
+                imagePoint = PetImage.TranslatePoint(new Point(0, 0), this);
+                imagePoint = new Point(windowPoint.X - imagePoint.X, windowPoint.Y - imagePoint.Y);
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         var localX = imagePoint.X;
         var localY = imagePoint.Y;
+        if (localX < -4 || localY < -4
+            || localX > PetImage.ActualWidth + 4
+            || localY > PetImage.ActualHeight + 4)
+            return false;
+
         var scale = Math.Min(PetImage.ActualWidth / source.PixelWidth,
             PetImage.ActualHeight / source.PixelHeight);
         if (!double.IsFinite(scale) || scale <= 0)
@@ -380,17 +458,44 @@ public partial class MainWindow : Window
             return false;
 
         var alpha = GetSpriteAlpha(_currentSpriteName, source);
-        // 轻微邻域采样，减少翻转/抗锯齿边缘点不中。
-        return SampleAlpha(alpha, source.PixelWidth, source.PixelHeight, pixelX, pixelY) >= 22;
+        // 阈值放宽 + 更大邻域，动作帧半透明边缘也能点中
+        return SampleAlpha(alpha, source.PixelWidth, source.PixelHeight, pixelX, pixelY) >= 12;
+    }
+
+    /// <summary>
+    /// 角色躯干软命中区：像素 alpha 偶发失败时（翻转/跳跃/抗锯齿），中间主体仍可点。
+    /// </summary>
+    private bool IsSoftBodyHit(Point windowPoint)
+    {
+        if (!IsLoaded || PetImage.ActualWidth <= 0 || PetImage.ActualHeight <= 0)
+            return false;
+        try
+        {
+            var topLeft = PetImage.TransformToAncestor(this).Transform(new Point(0, 0));
+            var w = PetImage.ActualWidth;
+            var h = PetImage.ActualHeight;
+            // 中间约 62% 宽、上方 12%～下方 92%：盖住身体，避开大片透明边
+            var left = topLeft.X + w * 0.19;
+            var right = topLeft.X + w * 0.81;
+            var top = topLeft.Y + h * 0.12;
+            var bottom = topLeft.Y + h * 0.92;
+            return windowPoint.X >= left && windowPoint.X <= right
+                   && windowPoint.Y >= top && windowPoint.Y <= bottom;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static byte SampleAlpha(byte[] alpha, int width, int height, int x, int y)
     {
         byte best = alpha[y * width + x];
-        if (best >= 22)
+        if (best >= 12)
             return best;
-        for (var dy = -1; dy <= 1; dy++)
-        for (var dx = -1; dx <= 1; dx++)
+        // 3px 邻域，抗锯齿/缩放采样更稳
+        for (var dy = -2; dy <= 2; dy++)
+        for (var dx = -2; dx <= 2; dx++)
         {
             var nx = x + dx;
             var ny = y + dy;
@@ -399,6 +504,47 @@ public partial class MainWindow : Window
             best = Math.Max(best, alpha[ny * width + nx]);
         }
         return best;
+    }
+
+    /// <summary>
+    /// 输入自愈：修复「用着用着突然点不上」——穿透残留、拖拽捕获死锁、Opacity/HitTest 卡住。
+    /// </summary>
+    private void InputHealTimer_Tick(object? sender, EventArgs e)
+    {
+        if (_isExiting || !IsLoaded || _manuallyHidden || !IsVisible)
+            return;
+
+        // 1) 拖拽超时或左键已松开但仍标记 dragging → 强制结束
+        if (_isDragging)
+        {
+            var leftDown = System.Windows.Input.Mouse.LeftButton == MouseButtonState.Pressed;
+            var tooLong = _dragStartedAt != DateTime.MinValue
+                          && DateTime.Now - _dragStartedAt > TimeSpan.FromSeconds(12);
+            if (!leftDown || tooLong)
+                EndDrag(interrupted: true);
+        }
+
+        // 2) 非穿透模式确保 Win32 样式没有 WS_EX_TRANSPARENT 残留
+        if (!_settings.ClickThrough && !_hiddenForFullscreen)
+            NativeWindowService.EnsureClickThroughOff(this);
+
+        // 3) 可见状态下 HitTest / Opacity 不应被卡住
+        if (!_hiddenForFullscreen && _introDone)
+        {
+            if (!PetRoot.IsHitTestVisible)
+                PetRoot.IsHitTestVisible = true;
+
+            // Opacity 被动画或全屏逻辑弄到接近 0 但并非全屏隐藏
+            if (Opacity < 0.5)
+            {
+                BeginAnimation(OpacityProperty, null);
+                Opacity = 1;
+            }
+        }
+
+        // 4) 始终置顶偶发掉层：定时轻量重申（不抢焦点）
+        if (_settings.AlwaysOnTop && !Topmost)
+            Topmost = true;
     }
 
     private byte[] GetSpriteAlpha(string name, BitmapSource source)
@@ -486,8 +632,10 @@ public partial class MainWindow : Window
 
     private void StartWalking()
     {
-        // 与喝水/比心/专注等互斥：专注中、专属动作中、拖动中不散步。
-        if (_isDragging || !_settings.AutoWalk || IsFocusActive || IsExclusiveBusy || !IsPetVisibleActive)
+        // 专注/拖动/入场/隐藏中不散步；短时 exclusive（比心等）不拦截开步，避免永远走不起来。
+        if (_isDragging || !_settings.AutoWalk || IsFocusActive || _introPlaying || !IsPetVisibleActive)
+            return;
+        if (_isWalking)
             return;
 
         var area = ScreenService.GetWorkingArea(this);
@@ -495,10 +643,24 @@ public partial class MainWindow : Window
         var roomRight = area.Right - (Left + Width);
         _walkDirection = roomRight < Width / 2 ? -1 : roomLeft < Width / 2 ? 1 : Random.Shared.Next(2) == 0 ? -1 : 1;
         FacingTransform.ScaleX = _walkDirection;
-        _walkUntil = DateTime.Now.AddSeconds(Random.Shared.Next(3, 7));
+        _walkUntil = DateTime.Now.AddSeconds(Random.Shared.Next(4, 9));
         _isWalking = true;
+        // 清除短互斥，避免 walk 被后续 ambient 立刻顶掉观感
+        if (DateTime.Now < _exclusiveUntil)
+            _exclusiveUntil = DateTime.MinValue;
         _movementTimer.Start();
         PlayAction("walk");
+    }
+
+    /// <summary>保证行为/提醒定时器在 intro 完成后一定跑起来（全屏恢复、托盘显示也会调用）。</summary>
+    private void EnsureBehaviorTimersRunning()
+    {
+        if (_isExiting || !_introDone)
+            return;
+        if (!_behaviorTimer.IsEnabled && IsPetVisibleActive)
+            _behaviorTimer.Start();
+        if (!_reminderTimer.IsEnabled)
+            _reminderTimer.Start();
     }
 
     private void StopWalking(bool recover = true)
@@ -540,31 +702,38 @@ public partial class MainWindow : Window
 
     private void BehaviorTimer_Tick(object? sender, EventArgs e)
     {
-        _behaviorTimer.Interval = TimeSpan.FromSeconds(Random.Shared.Next(6, 13));
-        if (!IsPetVisibleActive || _isDragging || _isWalking || IsFocusActive || IsExclusiveBusy)
+        // 6～10 秒一拍，提高自动散步可见性
+        _behaviorTimer.Interval = TimeSpan.FromSeconds(Random.Shared.Next(6, 11));
+        if (!IsPetVisibleActive || _isDragging || _isWalking || IsFocusActive || _introPlaying)
             return;
+        // 短 exclusive 只挡「花活动作」，不挡散步尝试
+        var exclusiveBlocksAmbient = DateTime.Now < _exclusiveUntil;
 
         if (IsQuietNow())
         {
-            if (Random.Shared.NextDouble() < 0.6)
+            if (!exclusiveBlocksAmbient && Random.Shared.NextDouble() < 0.55)
             {
                 PlayAction("sleep", exclusiveSeconds: 2);
-                if (Random.Shared.NextDouble() < 0.35)
+                if (Random.Shared.NextDouble() < 0.3)
                     ShowMessage("安静陪着你，先眯一会儿……", 3.5);
             }
             return;
         }
 
         var roll = Random.Shared.NextDouble();
-        if (_settings.AutoWalk && roll < 0.24)
+        // 提高散步权重（约 40%），解决「好像不会自动散步」
+        if (_settings.AutoWalk && roll < 0.40)
         {
             StartWalking();
-            if (Random.Shared.NextDouble() < 0.4)
+            if (_isWalking && Random.Shared.NextDouble() < 0.35)
                 ShowMessage("我去旁边走走，马上回来～", 3.0);
             return;
         }
 
-        if (roll < 0.40)
+        if (exclusiveBlocksAmbient)
+            return;
+
+        if (roll < 0.55)
         {
             var life = new[] { "stretch", "drink", "read", "sit", "kneel" };
             PlayAmbientAction(life[Random.Shared.Next(life.Length)]);
@@ -588,6 +757,10 @@ public partial class MainWindow : Window
         if (!_settings.ShowSpeechBubbles)
             return;
 
+        // 偶尔提起记忆中的人物（有记忆 + 概率 + 节流，不是每次）
+        if (TryShowPersonMemoryBubble())
+            return;
+
         var line = GetAmbientLineForAction(actionKey);
         if (line is not null && Random.Shared.NextDouble() < 0.72)
         {
@@ -597,6 +770,28 @@ public partial class MainWindow : Window
 
         if (Random.Shared.NextDouble() < 0.42)
             ShowRandomLoveMessage();
+    }
+
+    /// <summary>
+    /// 人物记忆气泡：至少间隔 4 分钟，且由 Memory 内部概率控制「偶尔」。
+    /// </summary>
+    private bool TryShowPersonMemoryBubble()
+    {
+        if (DateTime.Now - _lastPersonBubbleAt < TimeSpan.FromMinutes(4))
+            return false;
+        try
+        {
+            var line = _agent.Memory.TryPickPersonBubble(_settings.PartnerName, probability: 0.28);
+            if (string.IsNullOrWhiteSpace(line))
+                return false;
+            _lastPersonBubbleAt = DateTime.Now;
+            ShowMessage(line, 4.2);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private string? GetAmbientLineForAction(string actionKey) => actionKey switch
@@ -626,34 +821,61 @@ public partial class MainWindow : Window
         if (e.ChangedButton != MouseButton.Left)
             return;
 
+        // 若上次拖拽异常未结束，先清掉，否则会一直吞点击
+        if (_isDragging)
+            EndDrag(interrupted: true);
+
         StopWalking(recover: false);
         _mouseDownClickCount = e.ClickCount;
         _dragMoved = false;
         _isDragging = true;
+        _dragStartedAt = DateTime.Now;
         _dragStartScreen = PointToScreen(e.GetPosition(this));
         _dragStartLeft = Left;
         _dragStartTop = Top;
-        PetImage.CaptureMouse();
+        try
+        {
+            PetImage.CaptureMouse();
+        }
+        catch
+        {
+            // 捕获失败仍允许点击逻辑在 Up 时走完
+        }
         e.Handled = true;
     }
 
     private void PetImage_MouseMove(object sender, MouseEventArgs e)
     {
-        if (!_isDragging || e.LeftButton != MouseButtonState.Pressed)
+        if (!_isDragging)
             return;
+
+        // 左键已松开但没收到 Up（切窗口/UAC/多屏）：立刻结束拖拽，恢复可点
+        if (e.LeftButton != MouseButtonState.Pressed)
+        {
+            EndDrag(interrupted: true);
+            return;
+        }
 
         var current = PointToScreen(e.GetPosition(this));
         var dpi = VisualTreeHelper.GetDpi(this);
         var deltaX = (current.X - _dragStartScreen.X) / dpi.DpiScaleX;
         var deltaY = (current.Y - _dragStartScreen.Y) / dpi.DpiScaleY;
+        _dragLastDeltaX = deltaX;
+        _dragLastDeltaY = deltaY;
         if (!_dragMoved && Math.Abs(deltaX) + Math.Abs(deltaY) > 5)
         {
             _dragMoved = true;
-            PlayAction("dragged");
+            // 拖起瞬间：多样化开场动作 + 面向拖拽方向
+            if (Math.Abs(deltaX) > 2)
+                FacingTransform.ScaleX = deltaX >= 0 ? 1 : -1;
+            var startRx = MouseReactionCatalog.PickDragStart(_settings.PartnerName);
+            ApplyMouseReaction(startRx, exclusiveSeconds: 0);
         }
         if (!_dragMoved)
             return;
 
+        if (Math.Abs(deltaX) > 8)
+            FacingTransform.ScaleX = deltaX >= 0 ? 1 : -1;
         Left = _dragStartLeft + deltaX;
         Top = _dragStartTop + deltaY;
     }
@@ -664,76 +886,124 @@ public partial class MainWindow : Window
             return;
 
         var localPoint = e.GetPosition(PetImage);
+        var moved = _dragMoved;
+        var clicks = _mouseDownClickCount;
+        var dx = _dragLastDeltaX;
+        var dy = _dragLastDeltaY;
+        var dragDuration = _dragStartedAt == DateTime.MinValue
+            ? 0.3
+            : Math.Max(0.05, (DateTime.Now - _dragStartedAt).TotalSeconds);
+        // 先释放捕获与拖拽标志，再播动画，避免动画期间仍吞事件
         _isDragging = false;
-        PetImage.ReleaseMouseCapture();
+        _dragStartedAt = DateTime.MinValue;
+        try
+        {
+            if (PetImage.IsMouseCaptured)
+                PetImage.ReleaseMouseCapture();
+        }
+        catch { /* ignore */ }
 
-        if (_dragMoved)
+        if (moved)
         {
             ScreenService.ClampToWorkingArea(this);
-            AddAffection(1);
-            PlayAction("recover");
+            var dist = Math.Sqrt(dx * dx + dy * dy);
+            var dir = MouseReactionCatalog.ResolveDragDirection(dx, dy);
+            var intensity = MouseReactionCatalog.ResolveDragIntensity(dist, dragDuration);
+            var rx = MouseReactionCatalog.PickDragRelease(dir, intensity, _settings.PartnerName, _lastMouseReactionAction);
+            ApplyMouseReaction(rx, exclusiveSeconds: 1.8);
             SavePosition();
         }
-        else if (_mouseDownClickCount >= 2)
+        else if (clicks >= 2)
         {
-            // 双击：比心亲亲
-            AddAffection(4);
-            PlayAction("heart");
-            ShowMessage($"最喜欢{_settings.PartnerName}啦 ♥", 3.2);
-            PlaySound(SystemSounds.Asterisk);
-            ResetRapidClicks();
+            RegisterRapidClick();
+            var rx = clicks >= 3
+                ? MouseReactionCatalog.PickClick(
+                    MouseReactionCatalog.ResolveZone(0.5, 0.5),
+                    _rapidClickCount,
+                    clicks,
+                    _settings.PartnerName,
+                    _lastMouseReactionAction)
+                : MouseReactionCatalog.PickDoubleClick(_settings.PartnerName, _lastMouseReactionAction);
+            ApplyMouseReaction(rx, exclusiveSeconds: 2.2);
+            if (rx.PlaySound)
+                PlaySound(SystemSounds.Asterisk);
+            if (clicks >= 3)
+                ResetRapidClicks();
         }
         else
         {
-            HandleBodyZoneClick(localPoint);
+            HandleBodyZoneClick(localPoint, clicks);
         }
+        _dragMoved = false;
+        _mouseDownClickCount = 0;
+        _dragLastDeltaX = 0;
+        _dragLastDeltaY = 0;
         e.Handled = true;
     }
 
     /// <summary>
-    /// 按角色区域反馈：头部摸头、脚底跳脚、身体随机互动；短时间连点会触发大笑彩蛋。
+    /// 3×3 分区 + 连点档位 → 多样化动作（MouseReactionCatalog）。
     /// </summary>
-    private void HandleBodyZoneClick(Point localPoint)
+    private void HandleBodyZoneClick(Point localPoint, int clickCount = 1)
     {
-        var height = Math.Max(1, PetImage.ActualHeight);
-        var ratioY = localPoint.Y / height;
+        var w = Math.Max(1, PetImage.ActualWidth);
+        var h = Math.Max(1, PetImage.ActualHeight);
+        var ratioX = localPoint.X / w;
+        var ratioY = localPoint.Y / h;
+        // 翻转时视觉左右对调，分区按视觉习惯校正
+        if (FacingTransform.ScaleX < 0)
+            ratioX = 1 - ratioX;
+
         RegisterRapidClick();
-
-        if (_rapidClickCount >= 5)
-        {
+        var zone = MouseReactionCatalog.ResolveZone(ratioX, ratioY);
+        var rx = MouseReactionCatalog.PickClick(
+            zone, _rapidClickCount, clickCount, _settings.PartnerName, _lastMouseReactionAction);
+        ApplyMouseReaction(rx, exclusiveSeconds: 1.8);
+        if (rx.PlaySound)
+            PlaySound(SystemSounds.Beep);
+        if (_rapidClickCount >= 8)
             ResetRapidClicks();
-            AddAffection(5);
-            PlayAction("laugh");
-            ShowMessage("哈哈哈哈，你点得好认真！", 3.6);
-            PlaySound(SystemSounds.Asterisk);
-            return;
+    }
+
+    private void ApplyMouseReaction(MouseReaction reaction, double exclusiveSeconds = 1.6)
+    {
+        _lastMouseReactionAction = reaction.ActionKey;
+        AddAffection(reaction.Affection);
+        // walk 作点击反馈时只播短动作，避免真走起来抢状态
+        var key = reaction.ActionKey;
+        if (key.Equals("walk", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("dizzy_spin", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("delighted", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("wink", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("bashful", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("look_back", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("tiptoe", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("land", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("annoyed", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("sleepy", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("celebrate", StringComparison.OrdinalIgnoreCase))
+        {
+            // 映射到目录中已有动作
+            key = key switch
+            {
+                "walk" => "tiptoe",
+                "dizzy_spin" => "surprised",
+                "delighted" => "clap",
+                "wink" => "shy",
+                "bashful" => "shy",
+                "look_back" => "curious",
+                "tiptoe" => "dance",
+                "land" => "recover",
+                "annoyed" => "pout",
+                "sleepy" => "sleep",
+                "celebrate" => "birthday",
+                _ => key,
+            };
         }
 
-        if (ratioY < 0.42)
-        {
-            // 头部区域：摸头
-            AddAffection(3);
-            PlayAction("headpat");
-            ShowMessage("再摸一下嘛，我很乖的。", 3.2);
-            PlaySound(SystemSounds.Beep);
-        }
-        else if (ratioY > 0.78)
-        {
-            // 脚底区域：跳脚 / 惊讶
-            AddAffection(2);
-            var footActions = new[] { "surprised", "jump", "pout" };
-            PlayAction(footActions[Random.Shared.Next(footActions.Length)]);
-            ShowMessage("嘿！脚底很痒啦～", 3.0);
-            PlaySound(SystemSounds.Beep);
-        }
-        else
-        {
-            // 身体区域：随机互动
-            AddAffection(1);
-            var actions = new[] { "wave", "shy", "jump", "curious", "clap", "kneel", "plush" };
-            PlayAction(actions[Random.Shared.Next(actions.Length)]);
-            ShowRandomLoveMessage();
-        }
+        PlayAction(key, exclusiveSeconds: exclusiveSeconds);
+        if (!string.IsNullOrWhiteSpace(reaction.Message))
+            ShowMessage(reaction.Message, 3.4);
     }
 
     private void RegisterRapidClick()
@@ -754,12 +1024,21 @@ public partial class MainWindow : Window
 
     private void PetImage_MouseDown(object sender, MouseButtonEventArgs e)
     {
-        // 中键：打开离线聊天窗口
+        // 中键：打开聊天窗口
         if (e.ChangedButton == MouseButton.Middle)
         {
             OpenChat();
             e.Handled = true;
         }
+    }
+
+    private void PetImage_MouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        if (_settings.ClickThrough || !IsPetVisibleActive)
+            return;
+        var rx = MouseReactionCatalog.PickWheel(e.Delta > 0, _settings.PartnerName);
+        ApplyMouseReaction(rx, exclusiveSeconds: 1.4);
+        e.Handled = true;
     }
 
     private void OpenChat()
@@ -805,12 +1084,32 @@ public partial class MainWindow : Window
         try
         {
             var area = ScreenService.GetWorkingArea(this);
-            // 优先放在桌宠左侧，空间不够则放到右侧。
-            var preferredLeft = Left - chat.Width - 12;
-            if (preferredLeft < area.Left)
-                preferredLeft = Left + Width + 12;
-            chat.Left = Math.Clamp(preferredLeft, area.Left, Math.Max(area.Left, area.Right - chat.Width));
-            chat.Top = Math.Clamp(Top, area.Top, Math.Max(area.Top, area.Bottom - chat.Height));
+            // 先按工作区给聊天窗合理尺寸，再定位（避免 Width 未布局时为 NaN）
+            if (chat is ChatWindow)
+            {
+                chat.Width = Math.Clamp(area.Width * 0.34, 360, 560);
+                chat.Height = Math.Clamp(area.Height * 0.78, 520, 860);
+            }
+
+            var chatW = chat.Width > 0 && !double.IsNaN(chat.Width) ? chat.Width : 420;
+            var chatH = chat.Height > 0 && !double.IsNaN(chat.Height) ? chat.Height : 680;
+
+            // 优先桌宠左侧；不够则右侧；再不够则贴工作区左边并垂直居中靠近桌宠
+            var preferredLeft = Left - chatW - 16;
+            if (preferredLeft < area.Left + 4)
+                preferredLeft = Left + Width + 16;
+            if (preferredLeft + chatW > area.Right - 4)
+                preferredLeft = Math.Max(area.Left + 8, area.Right - chatW - 8);
+
+            var preferredTop = Top + (Height - chatH) / 2;
+            if (preferredTop < area.Top + 8)
+                preferredTop = area.Top + 8;
+            if (preferredTop + chatH > area.Bottom - 8)
+                preferredTop = Math.Max(area.Top + 8, area.Bottom - chatH - 8);
+
+            chat.Left = preferredLeft;
+            chat.Top = preferredTop;
+            chat.WindowStartupLocation = WindowStartupLocation.Manual;
         }
         catch
         {
@@ -828,9 +1127,17 @@ public partial class MainWindow : Window
 
     private void EndDrag(bool interrupted)
     {
-        if (!_isDragging)
+        if (!_isDragging && !PetImage.IsMouseCaptured)
+        {
+            _dragMoved = false;
+            _mouseDownClickCount = 0;
+            _dragStartedAt = DateTime.MinValue;
             return;
+        }
+
+        var moved = _dragMoved;
         _isDragging = false;
+        _dragStartedAt = DateTime.MinValue;
         try
         {
             if (PetImage.IsMouseCaptured)
@@ -842,7 +1149,7 @@ public partial class MainWindow : Window
         }
 
         StopSpriteAnimations();
-        if (_dragMoved)
+        if (moved)
         {
             ScreenService.ClampToWorkingArea(this);
             PlayAction("recover", exclusiveSeconds: 1.2);
@@ -1101,20 +1408,25 @@ public partial class MainWindow : Window
         _hiddenForFullscreen = shouldHide;
         if (shouldHide)
         {
+            // 全屏前若正在拖拽，先松手，否则恢复后捕获状态错乱
+            if (_isDragging)
+                EndDrag(interrupted: true);
             StopWalking(recover: false);
             _actionTimer.Stop();
             _movementTimer.Stop();
             _behaviorTimer.Stop();
             StopSpriteAnimations();
+            BeginAnimation(OpacityProperty, null);
             Opacity = 0;
             PetRoot.IsHitTestVisible = false;
         }
         else
         {
-            Opacity = _introDone ? 1 : Opacity;
+            BeginAnimation(OpacityProperty, null);
+            Opacity = _introDone ? 1 : Math.Max(Opacity, 0.01);
             PetRoot.IsHitTestVisible = true;
-            if (!_behaviorTimer.IsEnabled && _introDone)
-                _behaviorTimer.Start();
+            ApplyClickThroughState(force: true);
+            EnsureBehaviorTimersRunning();
             DisplayCurrentFrame();
             if (IsPetVisibleActive)
                 _actionTimer.Start();
@@ -1182,8 +1494,12 @@ public partial class MainWindow : Window
         _clickThroughMenuItem = AddCheckMenuItem(_trayMenu.Items, "鼠标穿透  (Ctrl+Shift+P)", _settings.ClickThrough, (_, _) =>
         {
             _settings.ClickThrough = _clickThroughMenuItem!.Checked;
-            NativeWindowService.SetClickThrough(this, _settings.ClickThrough);
+            ApplyClickThroughState(force: true);
             SaveSettings();
+            if (_settings.ClickThrough)
+                ShowMessage("已开启穿透：点不到我是正常的，托盘或 Ctrl+Shift+P 可关掉。", 3.5);
+            else
+                ShowMessage("已关闭穿透，可以点我啦～", 2.5);
         });
 
         var sizeMenu = new Forms.ToolStripMenuItem("角色大小");
@@ -1202,6 +1518,8 @@ public partial class MainWindow : Window
         AddMenuItem(_trayMenu.Items, "关于", (_, _) => ShowAbout());
         _trayMenu.Items.Add(new Forms.ToolStripSeparator());
         AddMenuItem(_trayMenu.Items, "完全退出", (_, _) => ExitApplication());
+        // 一键卸载：清启动项 + 本地数据 + 尝试删除 EXE
+        AddMenuItem(_trayMenu.Items, "一键卸载（清除全部数据）…", (_, _) => UninstallCompletely());
 
         Drawing.Icon icon;
         try
@@ -1299,10 +1617,13 @@ public partial class MainWindow : Window
         if (!IsVisible) Show();
         // 用户从托盘主动显示时，优先可见，不被残留全屏标记挡住。
         _hiddenForFullscreen = false;
+        if (_isDragging)
+            EndDrag(interrupted: true);
+        BeginAnimation(OpacityProperty, null);
         Opacity = 1;
         PetRoot.IsHitTestVisible = true;
-        if (!_behaviorTimer.IsEnabled && _introDone)
-            _behaviorTimer.Start();
+        ApplyClickThroughState(force: true);
+        EnsureBehaviorTimersRunning();
         if (!_actionTimer.IsEnabled)
         {
             DisplayCurrentFrame();
@@ -1351,10 +1672,12 @@ public partial class MainWindow : Window
                             break;
                         case HotkeyService.IdClickThrough:
                             _settings.ClickThrough = !_settings.ClickThrough;
-                            NativeWindowService.SetClickThrough(this, _settings.ClickThrough);
+                            ApplyClickThroughState(force: true);
                             UpdateTrayChecks();
                             SaveSettings();
-                            ShowMessage(_settings.ClickThrough ? "已开启鼠标穿透。" : "已关闭鼠标穿透，可以点我啦。", 2.8);
+                            ShowMessage(_settings.ClickThrough
+                                ? "已开启鼠标穿透（点不到我是正常的）。"
+                                : "已关闭鼠标穿透，可以点我啦。", 2.8);
                             break;
                         case HotkeyService.IdSettings:
                             OpenSettings();
@@ -1468,6 +1791,61 @@ public partial class MainWindow : Window
         Application.Current.Shutdown();
     }
 
+    /// <summary>
+    /// 右键菜单：一键卸载——确认后清除启动项、%LocalAppData%\BunnyCompanion 全部数据，并安排删除 EXE。
+    /// </summary>
+    private void UninstallCompletely()
+    {
+        if (_isUninstalling || _isExiting)
+            return;
+
+        var confirm = MessageBox.Show(
+            "确定要从这台电脑上彻底卸载「小申陪伴」吗？\n\n" +
+            "将删除：\n" +
+            "· 开机自动启动项\n" +
+            "· 本地设置、爱心值、互动记录、日志\n" +
+            "· 程序文件（退出后自动尝试删除 EXE）\n\n" +
+            "此操作不可恢复。",
+            "一键卸载",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+
+        if (confirm != MessageBoxResult.Yes)
+            return;
+
+        var confirm2 = MessageBox.Show(
+            "再确认一次：真的要卸载并清空所有数据吗？",
+            "最后确认",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+
+        if (confirm2 != MessageBoxResult.Yes)
+            return;
+
+        _isUninstalling = true;
+
+        // 先停 UI / 热键 / 托盘，再清数据，避免卸载过程中再写 settings
+        try { _chatWindow?.Close(); } catch { /* ignore */ }
+        _chatWindow = null;
+        try { _hotkeys?.Dispose(); } catch { /* ignore */ }
+        _hotkeys = null;
+
+        var result = UninstallService.Run(_settingsService.ConfigDirectory);
+
+        MessageBox.Show(
+            result.Summary,
+            "卸载完成",
+            MessageBoxButton.OK,
+            MessageBoxImage.Information);
+
+        // 退出时不再保存设置
+        PrepareForSessionEnd();
+        try { Close(); } catch { /* ignore */ }
+        Application.Current.Shutdown();
+    }
+
     internal void PrepareForSessionEnd()
     {
         if (_isExiting)
@@ -1482,6 +1860,9 @@ public partial class MainWindow : Window
         _reminderTimer.Stop();
         _fullscreenTimer.Stop();
         _focusTimer.Stop();
+        _inputHealTimer.Stop();
+        if (_isDragging)
+            EndDrag(interrupted: true);
         try
         {
             _chatWindow?.Close();
@@ -1493,12 +1874,18 @@ public partial class MainWindow : Window
         _chatWindow = null;
         try { _hotkeys?.Dispose(); } catch { /* ignore */ }
         _hotkeys = null;
-        if (IsLoaded)
+
+        // 卸载模式：禁止再写回 settings.json（目录可能已删）
+        if (!_isUninstalling)
         {
-            _settings.LastLeft = Left;
-            _settings.LastTop = Top;
+            if (IsLoaded)
+            {
+                _settings.LastLeft = Left;
+                _settings.LastTop = Top;
+            }
+            SaveSettings();
         }
-        SaveSettings();
+
         if (_notifyIcon is not null)
         {
             _notifyIcon.Visible = false;

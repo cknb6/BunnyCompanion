@@ -14,8 +14,10 @@
     <Version>1.1.0</Version>
     <Title>小申陪伴</Title>
     <Product>小申陪伴</Product>
-    <Authors>Made with care</Authors>
-    <Description>A Windows desktop companion (self-contained single-file EXE).</Description>
+    <Authors>传康Kk</Authors>
+    <Company>传康Kk（万能程序员）</Company>
+    <Copyright>微信 1837620622 · 邮箱 2040168455@qq.com</Copyright>
+    <Description>小申陪伴 — Windows 桌面宠物与本机 Agent（自包含 EXE）。</Description>
     <!-- RID 由 Build-Windows.ps1 / CI 矩阵传入（win-x64 / win-arm64），勿写死 -->
     <!-- 自包含：对方无需安装 .NET，体积约 70～100MB / 架构 -->
     <SelfContained>true</SelfContained>

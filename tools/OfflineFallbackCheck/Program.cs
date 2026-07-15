@@ -2,7 +2,7 @@ using BunnyCompanion.Models;
 using BunnyCompanion.Services;
 
 // 驱动已交付的 ChatReplyService.Reply（真实源文件链接编译），禁止复刻逻辑。
-var settings = new PetSettings { PartnerName = "宝贝", PetName = "小申" };
+var settings = new PetSettings { PartnerName = "宝宝", PetName = "小申" };
 var samples = new[]
 {
     "",
@@ -34,7 +34,7 @@ foreach (var sample in samples)
 // 多样性：清空情话池，强制走通用 FallbackReplies（真实 Reply 入口，不复刻逻辑）
 var diversitySettings = new PetSettings
 {
-    PartnerName = "宝贝",
+    PartnerName = "宝宝",
     PetName = "小申",
     LoveMessages = [],
 };

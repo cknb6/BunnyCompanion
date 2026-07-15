@@ -117,6 +117,7 @@
              MouseLeftButtonUp="PetImage_MouseLeftButtonUp"
              MouseMove="PetImage_MouseMove"
              MouseDown="PetImage_MouseDown"
+             MouseWheel="PetImage_MouseWheel"
              LostMouseCapture="PetImage_LostMouseCapture">
         <Image.RenderTransform>
           <TransformGroup>

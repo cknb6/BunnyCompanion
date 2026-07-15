@@ -62,6 +62,17 @@ public static class PetActionCatalog
             ["flowers"] = Single("flowers", 1700),
             // point 精灵已有；作为指向/说明类动作入口
             ["point"] = new("point", [F("point", 900), F("wave", 500)]),
+            // 鼠标反应别名：映射到已有精灵序列，避免点拖反馈落回 idle
+            ["delighted"] = new("delighted", [F("delighted", 900), F("clap", 500)]),
+            ["wink"] = new("wink", [F("wink", 700), F("shy", 500)]),
+            ["bashful"] = new("bashful", [F("bashful", 800), F("shy", 500)]),
+            ["look_back"] = new("look_back", [F("look_back", 700), F("curious", 600)]),
+            ["tiptoe"] = new("tiptoe", [F("tiptoe", 900), F("recover", 350)]),
+            ["land"] = new("land", [F("land", 500), F("recover", 400)]),
+            ["annoyed"] = new("annoyed", [F("annoyed", 800), F("pout", 500)]),
+            ["sleepy"] = new("sleepy", [F("sleepy", 700), F("yawn", 600)]),
+            ["celebrate"] = new("celebrate", [F("celebrate", 900), F("clap", 500)]),
+            ["dizzy_spin"] = new("dizzy_spin", [F("surprised", 550), F("pout", 450), F("recover", 400)]),
         };
 
         return actions;

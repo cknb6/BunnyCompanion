@@ -46,7 +46,14 @@ internal static class AiConfig
         "nvidia/nemotron-nano-12b-v2-vl:free",
     ];
 
-    public const int RequestTimeoutSeconds = 90;
-    public const int MaxHistoryMessages = 16;
-    public const int MaxReplyChars = 1800;
+    public const int RequestTimeoutSeconds = 120;
+    public const int MaxHistoryMessages = 20;
+    /// <summary>聊天窗完整展示长文/代码，避免中途截断。</summary>
+    public const int MaxReplyChars = 12000;
+    /// <summary>单次文本附件塞进 prompt 的上限。</summary>
+    public const int MaxAttachmentTextChars = 60000;
+    /// <summary>单次对话最多 tool 往返轮数（防死循环）。</summary>
+    public const int MaxToolRounds = 8;
+    /// <summary>单次工具返回塞回模型的最大字符数。</summary>
+    public const int MaxToolResultChars = 14000;
 }

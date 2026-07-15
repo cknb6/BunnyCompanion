@@ -45,8 +45,32 @@ public static class NativeWindowService
         if (handle == IntPtr.Zero)
             return;
         var style = GetWindowLong(handle, GwlExStyle);
-        style = enabled ? style | WsExTransparent : style & ~WsExTransparent;
-        SetWindowLong(handle, GwlExStyle, style);
+        var next = enabled ? style | WsExTransparent : style & ~WsExTransparent;
+        if (next != style)
+            SetWindowLong(handle, GwlExStyle, next);
+    }
+
+    /// <summary>
+    /// 强制清除 WS_EX_TRANSPARENT（修复「设置已关穿透但 HWND 仍穿透」导致点不上）。
+    /// </summary>
+    public static void EnsureClickThroughOff(Window window)
+    {
+        var handle = new WindowInteropHelper(window).Handle;
+        if (handle == IntPtr.Zero)
+            return;
+        var style = GetWindowLong(handle, GwlExStyle);
+        if ((style & WsExTransparent) == 0)
+            return;
+        SetWindowLong(handle, GwlExStyle, style & ~WsExTransparent);
+    }
+
+    /// <summary>当前窗口是否带穿透扩展样式。</summary>
+    public static bool IsClickThroughStyle(Window window)
+    {
+        var handle = new WindowInteropHelper(window).Handle;
+        if (handle == IntPtr.Zero)
+            return false;
+        return (GetWindowLong(handle, GwlExStyle) & WsExTransparent) != 0;
     }
 
     /// <summary>
