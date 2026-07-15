@@ -1,0 +1,105 @@
+<Window x:Class="BunnyCompanion.ChatWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="和小申聊聊"
+        Width="400" Height="560"
+        MinWidth="340" MinHeight="440"
+        WindowStartupLocation="Manual"
+        Background="#FFF8FA"
+        FontFamily="Microsoft YaHei UI"
+        ShowInTaskbar="True"
+        Topmost="True"
+        ResizeMode="CanResizeWithGrip"
+        KeyDown="Window_KeyDown">
+  <Window.Resources>
+    <Style x:Key="SendButton" TargetType="Button">
+      <Setter Property="Background" Value="#E978A0" />
+      <Setter Property="Foreground" Value="White" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="Padding" Value="16,8" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style x:Key="ChipButton" TargetType="Button">
+      <Setter Property="Background" Value="#FFF0F5" />
+      <Setter Property="Foreground" Value="#A84C6E" />
+      <Setter Property="BorderBrush" Value="#F5D0DE" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Padding" Value="10,5" />
+      <Setter Property="Margin" Value="0,0,8,8" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="FontSize" Value="12" />
+    </Style>
+    <Style x:Key="SecondaryButton" TargetType="Button">
+      <Setter Property="Background" Value="White" />
+      <Setter Property="Foreground" Value="#765462" />
+      <Setter Property="BorderBrush" Value="#EBCDD9" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Padding" Value="12,7" />
+      <Setter Property="Margin" Value="0,0,8,0" />
+      <Setter Property="Cursor" Value="Hand" />
+    </Style>
+  </Window.Resources>
+
+  <Grid Margin="14">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+    </Grid.RowDefinitions>
+
+    <StackPanel Margin="2,0,2,8">
+      <TextBlock x:Name="TitleText" Text="和小申聊聊"
+                 FontSize="18" FontWeight="SemiBold" Foreground="#B65076" />
+      <TextBlock x:Name="StatusText"
+                 Text="多模态 Agent · 阶跃主链 · Groq/本地自动兜底"
+                 FontSize="11.5" Foreground="#917B85" Margin="0,3,0,0" TextWrapping="Wrap" />
+    </StackPanel>
+
+    <Border Grid.Row="1" Background="White" CornerRadius="14"
+            BorderBrush="#F4E1E8" BorderThickness="1" Padding="8">
+      <ScrollViewer x:Name="ChatScroll" VerticalScrollBarVisibility="Auto">
+        <StackPanel x:Name="ChatPanel" />
+      </ScrollViewer>
+    </Border>
+
+    <WrapPanel Grid.Row="2" Margin="0,10,0,4">
+      <Button Content="看桌面" Style="{StaticResource ChipButton}" Click="LookDesktop_Click" />
+      <Button Content="想你了" Style="{StaticResource ChipButton}" Click="QuickChip_Click" Tag="想你了" />
+      <Button Content="帮我写代码" Style="{StaticResource ChipButton}" Click="QuickChip_Click" Tag="帮我写一段 Python 读取 CSV 并统计缺失值" />
+      <Button Content="帮我写文章" Style="{StaticResource ChipButton}" Click="QuickChip_Click" Tag="帮我写一段 200 字温柔的小短文" />
+      <Button Content="好累呀" Style="{StaticResource ChipButton}" Click="QuickChip_Click" Tag="好累呀" />
+      <Button Content="讲个笑话" Style="{StaticResource ChipButton}" Click="QuickChip_Click" Tag="讲个笑话" />
+    </WrapPanel>
+
+    <DockPanel Grid.Row="3" Margin="0,0,0,8" LastChildFill="False">
+      <CheckBox x:Name="DesktopCheck" Content="发送时附带桌面截图" IsChecked="False"
+                Foreground="#7A5B68" VerticalAlignment="Center" />
+      <Button DockPanel.Dock="Right" Content="清空对话" Style="{StaticResource SecondaryButton}"
+              HorizontalAlignment="Right" Click="ClearButton_Click" />
+    </DockPanel>
+
+    <Grid Grid.Row="4">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*" />
+        <ColumnDefinition Width="Auto" />
+      </Grid.ColumnDefinitions>
+      <TextBox x:Name="InputBox"
+               MaxLength="1200"
+               MinHeight="42"
+               AcceptsReturn="True"
+               TextWrapping="Wrap"
+               VerticalScrollBarVisibility="Auto"
+               Padding="10,8"
+               BorderBrush="#F0D7E0"
+               KeyDown="InputBox_KeyDown" />
+      <Button x:Name="SendButton" Grid.Column="1" Content="发送"
+              Style="{StaticResource SendButton}"
+              Margin="8,0,0,0"
+              MinWidth="72"
+              Click="SendButton_Click" />
+    </Grid>
+  </Grid>
+</Window>

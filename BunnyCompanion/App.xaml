@@ -1,0 +1,8 @@
+<Application x:Class="BunnyCompanion.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ShutdownMode="OnExplicitShutdown">
+  <Application.Resources>
+    <FontFamily x:Key="AppFont">Microsoft YaHei UI</FontFamily>
+  </Application.Resources>
+</Application>

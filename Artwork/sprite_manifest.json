@@ -1,0 +1,434 @@
+{
+  "idle": {
+    "file": "Assets/Sprites/idle.png",
+    "sheet": "core_motion.png",
+    "cell": 1,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "breathe": {
+    "file": "Assets/Sprites/breathe.png",
+    "sheet": "core_motion.png",
+    "cell": 2,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "blink": {
+    "file": "Assets/Sprites/blink.png",
+    "sheet": "core_motion.png",
+    "cell": 3,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "wave": {
+    "file": "Assets/Sprites/wave.png",
+    "sheet": "core_motion.png",
+    "cell": 4,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "walk_1": {
+    "file": "Assets/Sprites/walk_1.png",
+    "sheet": "core_motion.png",
+    "cell": 5,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "walk_2": {
+    "file": "Assets/Sprites/walk_2.png",
+    "sheet": "core_motion.png",
+    "cell": 6,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "walk_3": {
+    "file": "Assets/Sprites/walk_3.png",
+    "sheet": "core_motion.png",
+    "cell": 7,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "tiptoe": {
+    "file": "Assets/Sprites/tiptoe.png",
+    "sheet": "core_motion.png",
+    "cell": 8,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "jump_ready": {
+    "file": "Assets/Sprites/jump_ready.png",
+    "sheet": "core_motion.png",
+    "cell": 9,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "jump": {
+    "file": "Assets/Sprites/jump.png",
+    "sheet": "core_motion.png",
+    "cell": 10,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "land": {
+    "file": "Assets/Sprites/land.png",
+    "sheet": "core_motion.png",
+    "cell": 11,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "look_back": {
+    "file": "Assets/Sprites/look_back.png",
+    "sheet": "core_motion.png",
+    "cell": 12,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "sit": {
+    "file": "Assets/Sprites/sit.png",
+    "sheet": "core_motion.png",
+    "cell": 13,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "kneel": {
+    "file": "Assets/Sprites/kneel.png",
+    "sheet": "core_motion.png",
+    "cell": 14,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "dragged": {
+    "file": "Assets/Sprites/dragged.png",
+    "sheet": "core_motion.png",
+    "cell": 15,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "recover": {
+    "file": "Assets/Sprites/recover.png",
+    "sheet": "core_motion.png",
+    "cell": 16,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "delighted": {
+    "file": "Assets/Sprites/delighted.png",
+    "sheet": "emotions.png",
+    "cell": 1,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "wink": {
+    "file": "Assets/Sprites/wink.png",
+    "sheet": "emotions.png",
+    "cell": 2,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "heart": {
+    "file": "Assets/Sprites/heart.png",
+    "sheet": "emotions.png",
+    "cell": 3,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "kiss": {
+    "file": "Assets/Sprites/kiss.png",
+    "sheet": "emotions.png",
+    "cell": 4,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "shy": {
+    "file": "Assets/Sprites/shy.png",
+    "sheet": "emotions.png",
+    "cell": 5,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "bashful": {
+    "file": "Assets/Sprites/bashful.png",
+    "sheet": "emotions.png",
+    "cell": 6,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "clap": {
+    "file": "Assets/Sprites/clap.png",
+    "sheet": "emotions.png",
+    "cell": 7,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "celebrate": {
+    "file": "Assets/Sprites/celebrate.png",
+    "sheet": "emotions.png",
+    "cell": 8,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "surprised": {
+    "file": "Assets/Sprites/surprised.png",
+    "sheet": "emotions.png",
+    "cell": 9,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "curious": {
+    "file": "Assets/Sprites/curious.png",
+    "sheet": "emotions.png",
+    "cell": 10,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "pout": {
+    "file": "Assets/Sprites/pout.png",
+    "sheet": "emotions.png",
+    "cell": 11,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "annoyed": {
+    "file": "Assets/Sprites/annoyed.png",
+    "sheet": "emotions.png",
+    "cell": 12,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "sad": {
+    "file": "Assets/Sprites/sad.png",
+    "sheet": "emotions.png",
+    "cell": 13,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "laugh": {
+    "file": "Assets/Sprites/laugh.png",
+    "sheet": "emotions.png",
+    "cell": 14,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "headpat": {
+    "file": "Assets/Sprites/headpat.png",
+    "sheet": "emotions.png",
+    "cell": 15,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "gift": {
+    "file": "Assets/Sprites/gift.png",
+    "sheet": "emotions.png",
+    "cell": 16,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "sleepy": {
+    "file": "Assets/Sprites/sleepy.png",
+    "sheet": "daily_life.png",
+    "cell": 1,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "yawn": {
+    "file": "Assets/Sprites/yawn.png",
+    "sheet": "daily_life.png",
+    "cell": 2,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "drowsy": {
+    "file": "Assets/Sprites/drowsy.png",
+    "sheet": "daily_life.png",
+    "cell": 3,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "sleep_curl": {
+    "file": "Assets/Sprites/sleep_curl.png",
+    "sheet": "daily_life.png",
+    "cell": 4,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "sleep_side": {
+    "file": "Assets/Sprites/sleep_side.png",
+    "sheet": "daily_life.png",
+    "cell": 5,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "stretch": {
+    "file": "Assets/Sprites/stretch.png",
+    "sheet": "daily_life.png",
+    "cell": 6,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "drink": {
+    "file": "Assets/Sprites/drink.png",
+    "sheet": "daily_life.png",
+    "cell": 7,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "read": {
+    "file": "Assets/Sprites/read.png",
+    "sheet": "daily_life.png",
+    "cell": 8,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "music": {
+    "file": "Assets/Sprites/music.png",
+    "sheet": "daily_life.png",
+    "cell": 9,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "dance": {
+    "file": "Assets/Sprites/dance.png",
+    "sheet": "daily_life.png",
+    "cell": 10,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "reminder": {
+    "file": "Assets/Sprites/reminder.png",
+    "sheet": "daily_life.png",
+    "cell": 11,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "point": {
+    "file": "Assets/Sprites/point.png",
+    "sheet": "daily_life.png",
+    "cell": 12,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "birthday": {
+    "file": "Assets/Sprites/birthday.png",
+    "sheet": "daily_life.png",
+    "cell": 13,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "plush": {
+    "file": "Assets/Sprites/plush.png",
+    "sheet": "daily_life.png",
+    "cell": 14,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "rain": {
+    "file": "Assets/Sprites/rain.png",
+    "sheet": "daily_life.png",
+    "cell": 15,
+    "size": [
+      384,
+      384
+    ]
+  },
+  "flowers": {
+    "file": "Assets/Sprites/flowers.png",
+    "sheet": "daily_life.png",
+    "cell": 16,
+    "size": [
+      384,
+      384
+    ]
+  }
+}

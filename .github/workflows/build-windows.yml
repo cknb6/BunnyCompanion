@@ -1,0 +1,81 @@
+name: Build Windows (win-x64)
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish-win-x64:
+    name: Publish self-contained single-file
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Offline fallback unit check
+        shell: pwsh
+        run: |
+          dotnet run --project tools/OfflineFallbackCheck/OfflineFallbackCheck.csproj -c Release
+
+      - name: Build with project script
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = "Stop"
+          & .\Build-Windows.ps1 -Runtime win-x64 -Configuration Release
+
+      - name: Verify delivery folder
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dir = Join-Path $env:GITHUB_WORKSPACE "可直接发送"
+          $exe = Join-Path $dir "小申陪伴.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw "Missing: $exe" }
+          Get-ChildItem -LiteralPath $dir | Format-Table Name, Length
+          Get-FileHash -LiteralPath $exe -Algorithm SHA256 | Format-List
+          $sizeMb = (Get-Item -LiteralPath $exe).Length / 1MB
+          if ($sizeMb -lt 30) { throw "Exe too small ($([Math]::Round($sizeMb,2)) MB)" }
+
+      - name: Upload delivery artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaoshen-companion-win-x64
+          path: |
+            可直接发送/小申陪伴.exe
+            可直接发送/使用说明.txt
+            可直接发送/版本校验.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Stage ASCII-named copy
+        shell: pwsh
+        run: |
+          $src = Join-Path $env:GITHUB_WORKSPACE "可直接发送\小申陪伴.exe"
+          $stage = Join-Path $env:GITHUB_WORKSPACE "artifact-ascii"
+          New-Item $stage -ItemType Directory -Force | Out-Null
+          Copy-Item -LiteralPath $src (Join-Path $stage "BunnyCompanion-win-x64.exe")
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "可直接发送\使用说明.txt") $stage -ErrorAction SilentlyContinue
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "可直接发送\版本校验.txt") $stage -ErrorAction SilentlyContinue
+
+      - name: Upload ASCII-named artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BunnyCompanion-win-x64
+          path: artifact-ascii/*
+          if-no-files-found: error
+          retention-days: 14

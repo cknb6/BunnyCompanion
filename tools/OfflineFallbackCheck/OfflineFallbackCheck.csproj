@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>OfflineFallbackCheck</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\..\BunnyCompanion\Models\PetSettings.cs" Link="PetSettings.cs" />
+    <Compile Include="..\..\BunnyCompanion\Services\ChatReplyService.cs" Link="ChatReplyService.cs" />
+  </ItemGroup>
+</Project>
