@@ -171,12 +171,9 @@ public static class ChatReplyService
         if (text.Length > 200)
             text = text[..200];
 
-        var lowered = text.ToLowerInvariant();
         foreach (var (keywords, replies, action, affection) in Rules)
         {
-            if (!keywords.Any(keyword =>
-                    text.Contains(keyword, StringComparison.OrdinalIgnoreCase)
-                    || lowered.Contains(keyword.ToLowerInvariant())))
+            if (!keywords.Any(keyword => MatchesKeyword(text, keyword)))
                 continue;
 
             var reply = replies[Random.Shared.Next(replies.Length)];
@@ -191,6 +188,37 @@ public static class ChatReplyService
 
         var fallback = FallbackReplies[Random.Shared.Next(FallbackReplies.Length)];
         return new ChatReply(Format(fallback, settings), "curious", 1);
+    }
+
+    /// <summary>
+    /// 中文关键词用子串匹配；短英文词（如 hi/love）用词边界，避免 hit/this 误触发。
+    /// </summary>
+    private static bool MatchesKeyword(string text, string keyword)
+    {
+        if (string.IsNullOrEmpty(keyword))
+            return false;
+
+        var isAsciiWord = keyword.All(c => c <= 127) && keyword.Any(char.IsLetter);
+        if (isAsciiWord && keyword.Length <= 8)
+        {
+            // 简易词边界：左右不是字母数字
+            var idx = 0;
+            while (idx < text.Length)
+            {
+                var found = text.IndexOf(keyword, idx, StringComparison.OrdinalIgnoreCase);
+                if (found < 0)
+                    return false;
+                var beforeOk = found == 0 || !char.IsLetterOrDigit(text[found - 1]);
+                var after = found + keyword.Length;
+                var afterOk = after >= text.Length || !char.IsLetterOrDigit(text[after]);
+                if (beforeOk && afterOk)
+                    return true;
+                idx = found + 1;
+            }
+            return false;
+        }
+
+        return text.Contains(keyword, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string Format(string message, PetSettings settings) => message
