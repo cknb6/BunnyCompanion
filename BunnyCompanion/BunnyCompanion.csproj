@@ -16,8 +16,8 @@
     <Product>小申陪伴</Product>
     <Authors>Made with care</Authors>
     <Description>A Windows desktop companion (self-contained single-file EXE).</Description>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <!-- 自包含：对方无需安装 .NET，体积约 100MB 级 -->
+    <!-- RID 由 Build-Windows.ps1 / CI 矩阵传入（win-x64 / win-arm64），勿写死 -->
+    <!-- 自包含：对方无需安装 .NET，体积约 70～100MB / 架构 -->
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
