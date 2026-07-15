@@ -32,15 +32,16 @@ Remove-Item $DeliveryDirectory -Recurse -Force -ErrorAction SilentlyContinue
 New-Item $PublishDirectory -ItemType Directory -Force | Out-Null
 New-Item $DeliveryDirectory -ItemType Directory -Force | Out-Null
 
-Write-Host "正在发布 $Runtime 自包含单文件版本……" -ForegroundColor Cyan
+Write-Host "正在发布 $Runtime 框架依赖单文件版本（小体积，约 10MB 级）……" -ForegroundColor Cyan
 & dotnet publish $ProjectFile `
     --configuration $Configuration `
     --runtime $Runtime `
-    --self-contained true `
+    --self-contained false `
     --output $PublishDirectory `
     -p:PublishSingleFile=true `
     -p:IncludeNativeLibrariesForSelfExtract=true `
     -p:EnableCompressionInSingleFile=true `
+    -p:PublishReadyToRun=false `
     -p:PublishTrimmed=false `
     -p:DebugType=None `
     -p:DebugSymbols=false
@@ -59,7 +60,17 @@ $UnexpectedFiles = @(Get-ChildItem $PublishDirectory -File -Recurse | Where-Obje
 })
 if ($UnexpectedFiles.Count -gt 0) {
     $Names = ($UnexpectedFiles | Select-Object -ExpandProperty Name) -join "、"
-    throw "发布目录仍存在未嵌入的运行文件：$Names。为避免交付一个无法独立运行的 EXE，已停止复制。"
+    throw "发布目录仍存在未嵌入的运行文件：$Names。"
+}
+
+$SizeBytes = (Get-Item -LiteralPath $PublishedExe).Length
+$SizeMb = [Math]::Round(($SizeBytes / 1048576.0), 2)
+# 框架依赖包通常数 MB～20MB；过大说明误开了自包含
+if ($SizeMb -gt 25) {
+    throw "产物过大（$SizeMb MB），疑似仍为自包含或资源膨胀，已停止交付。"
+}
+if ($SizeMb -lt 1) {
+    throw "产物过小（$SizeMb MB），可能发布失败。"
 }
 
 $FriendlyExe = Join-Path $DeliveryDirectory "小申陪伴.exe"
@@ -67,16 +78,16 @@ Copy-Item $PublishedExe $FriendlyExe
 Copy-Item (Join-Path $ProjectRoot "使用说明.txt") $DeliveryDirectory
 
 $Hash = (Get-FileHash $FriendlyExe -Algorithm SHA256).Hash
-$SizeMb = [Math]::Round(((Get-Item -LiteralPath $FriendlyExe).Length / 1048576.0), 2)
 $BuildInfo = @"
-小申陪伴 1.1
+小申陪伴 1.1（框架依赖 · 小体积）
 构建时间：$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
 运行架构：$Runtime
 文件大小：$SizeMb MB
 SHA256：$Hash
+说明：需安装 .NET 8 Desktop Runtime（x64）
 "@
 $BuildInfo | Set-Content (Join-Path $DeliveryDirectory "版本校验.txt") -Encoding UTF8
 
-Write-Host "" 
-Write-Host "构建成功：$FriendlyExe" -ForegroundColor Green
-Write-Host "把“可直接发送”文件夹发给她即可；对方无需安装 .NET。" -ForegroundColor Green
+Write-Host ""
+Write-Host "构建成功：$FriendlyExe （$SizeMb MB）" -ForegroundColor Green
+Write-Host "目标电脑需安装 .NET 8 Desktop Runtime：https://dotnet.microsoft.com/download/dotnet/8.0" -ForegroundColor Yellow

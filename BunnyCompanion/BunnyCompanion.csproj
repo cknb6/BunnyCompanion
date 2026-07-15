@@ -15,15 +15,23 @@
     <Title>小申陪伴</Title>
     <Product>小申陪伴</Product>
     <Authors>Made with care</Authors>
-    <Description>A private, local-first Windows desktop companion.</Description>
+    <Description>A private Windows desktop companion (framework-dependent, small package).</Description>
+    <!--
+      体积说明：自包含 SelfContained 会把整个 .NET/WPF 运行时打进 EXE（常 80～150MB）。
+      改为框架依赖：EXE 约数 MB～十余 MB，功能与内存行为不变；
+      目标电脑需安装一次 .NET 8 Desktop Runtime（微软官方免费）。
+    -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <SelfContained>true</SelfContained>
+    <SelfContained>false</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
-    <PublishReadyToRun>true</PublishReadyToRun>
+    <!-- ReadyToRun 会增大体积，小包模式下关闭 -->
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <!-- WPF 裁剪风险高，保持关闭，避免功能/内存异常 -->
     <PublishTrimmed>false</PublishTrimmed>
-    <DebugType>embedded</DebugType>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
     <Deterministic>true</Deterministic>
   </PropertyGroup>
 

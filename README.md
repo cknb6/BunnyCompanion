@@ -1,7 +1,7 @@
 # 小申陪伴（BunnyCompanion）
 
 面向 Windows 10/11 的私人定制桌面宠物（对标 Shimeji / VPet 等经典桌宠的托盘、穿透、拖拽、气泡与快捷操作范式）。  
-C# / WPF / .NET 8，可发布为自包含单文件 EXE。
+C# / WPF / .NET 8。默认发布为**框架依赖单文件**（约 10MB 级，功能不变）；目标机需安装 [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)。
 
 ## 已实现功能
 
@@ -11,7 +11,7 @@ C# / WPF / .NET 8，可发布为自包含单文件 EXE。
 - 全局快捷键：Ctrl+Shift+S/C/P/,/H（显隐/聊天/穿透/设置/帮助）
 - 自动行为状态机、散步与动作互斥、多显示器 DPI 适配
 - 粉嫩对话气泡（渐变+阴影+入场动画）
-- 多模态 Agent：阶跃主链 → Groq → **本地中文兜底**（强制简体中文）
+- 多模态 Agent：step-3.7-flash → OpenRouter 免费模型 → **本地中文兜底**
 - 主动「看桌面」截图理解（用户触发，非后台连环截屏）
 - 喝水/休息提醒、25 分钟专注、生日与纪念日、安静时段
 - 角色缩放、鼠标穿透、全屏自动隐藏、开机启动
@@ -55,9 +55,9 @@ BunnyCompanion/
 .\Build-Windows.ps1 -Runtime win-x64 -Configuration Release
 ```
 
-构建脚本执行 `dotnet publish`，强制使用自包含、单文件、不裁剪的 WPF 安全配置，并生成 SHA-256 校验值。接收者无需安装 .NET。
+构建脚本执行 `dotnet publish`：**框架依赖 + 单文件 + 压缩**，体积约 10MB 级；WPF 不裁剪以保证功能稳定。生成 SHA-256 校验值。
 
-自包含 WPF 会把 .NET 桌面运行时一起放入 EXE，正式文件通常明显大于源码 ZIP，这是正常现象。构建脚本会检查发布目录；如果仍存在未嵌入的运行文件，会停止交付，避免误发一个缺少依赖的 EXE。
+接收者需安装一次 .NET 8 Desktop Runtime（微软官方）。若改回自包含（对方免装运行库），体积会回到约 100MB 级。
 
 ## 本地数据
 

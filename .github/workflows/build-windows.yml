@@ -11,7 +11,7 @@ permissions:
 jobs:
   publish:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,41 +26,38 @@ jobs:
         run: |
           dotnet run --project tools/OfflineFallbackCheck/OfflineFallbackCheck.csproj -c Release
 
-      - name: Dotnet publish win-x64 single file
+      - name: Publish framework-dependent single-file (small)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $out = "publish-out"
-          if (Test-Path $out) { Remove-Item $out -Recurse -Force }
-          New-Item $out -ItemType Directory | Out-Null
-          dotnet publish BunnyCompanion/BunnyCompanion.csproj `
-            -c Release `
-            -r win-x64 `
-            --self-contained true `
-            -o $out `
-            -p:PublishSingleFile=true `
-            -p:IncludeNativeLibrariesForSelfExtract=true `
-            -p:EnableCompressionInSingleFile=true `
-            -p:PublishTrimmed=false `
-            -p:DebugType=None `
-            -p:DebugSymbols=false
-          if (-not (Test-Path "$out/BunnyCompanion.exe")) { throw "BunnyCompanion.exe missing" }
-          $size = (Get-Item "$out/BunnyCompanion.exe").Length
-          Write-Host "EXE size bytes: $size"
-          if ($size -lt 30000000) { throw "EXE too small for self-contained WPF" }
+          & .\Build-Windows.ps1 -Runtime win-x64 -Configuration Release
+          $exe = Join-Path $env:GITHUB_WORKSPACE "可直接发送\小申陪伴.exe"
+          if (-not (Test-Path -LiteralPath $exe)) { throw "missing delivery exe" }
+          $size = (Get-Item -LiteralPath $exe).Length
+          $mb = [Math]::Round($size / 1MB, 2)
+          Write-Host "Delivery size: $mb MB"
+          if ($mb -gt 25) { throw "too large: $mb MB" }
+          if ($mb -lt 1) { throw "too small: $mb MB" }
 
       - name: Stage dist
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          New-Item dist -ItemType Directory -Force | Out-Null
-          Copy-Item publish-out/BunnyCompanion.exe dist/BunnyCompanion-win-x64.exe
-          Copy-Item publish-out/BunnyCompanion.exe dist/XiaoShenCompanion.exe
-                    $hash = (Get-FileHash dist/BunnyCompanion-win-x64.exe -Algorithm SHA256).Hash
-          $size = (Get-Item dist/BunnyCompanion-win-x64.exe).Length
-          "SHA256=$hash" | Set-Content dist/artifact-info.txt
-          "SIZE=$size" | Add-Content dist/artifact-info.txt
-          Get-ChildItem dist | Format-Table Name, Length
+          $stage = Join-Path $env:GITHUB_WORKSPACE "dist"
+          New-Item $stage -ItemType Directory -Force | Out-Null
+          $delivery = Get-ChildItem -LiteralPath $env:GITHUB_WORKSPACE -Directory |
+            Where-Object { $_.Name -eq "可直接发送" } |
+            Select-Object -First 1
+          if (-not $delivery) { throw "delivery folder missing" }
+          Copy-Item -LiteralPath (Join-Path $delivery.FullName "小申陪伴.exe") (Join-Path $stage "XiaoShenCompanion.exe")
+          Copy-Item -LiteralPath (Join-Path $delivery.FullName "小申陪伴.exe") (Join-Path $stage "BunnyCompanion-win-x64.exe")
+          Copy-Item -LiteralPath (Join-Path $delivery.FullName "使用说明.txt") (Join-Path $stage "README-zh.txt") -ErrorAction SilentlyContinue
+          Copy-Item -LiteralPath (Join-Path $delivery.FullName "版本校验.txt") (Join-Path $stage "checksum.txt") -ErrorAction SilentlyContinue
+          $hash = (Get-FileHash (Join-Path $stage "BunnyCompanion-win-x64.exe") -Algorithm SHA256).Hash
+          $size = (Get-Item (Join-Path $stage "BunnyCompanion-win-x64.exe")).Length
+          "SHA256=$hash" | Set-Content (Join-Path $stage "artifact-info.txt")
+          "SIZE=$size" | Add-Content (Join-Path $stage "artifact-info.txt")
+          Get-ChildItem $stage | Format-Table Name, Length
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
