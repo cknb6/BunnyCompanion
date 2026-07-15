@@ -1,7 +1,32 @@
+# Build
 bin/
 obj/
+publish-out/
+dist/
+artifact-ascii/
 发布/
 可直接发送/
+
+# IDE
+.vs/
+.idea/
 *.user
 *.suo
-.vs/
+*.userosscache
+*.sln.docstates
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs / test
+*.log
+TestResults/
+coverage/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# NuGet (local packages folder if any)
+packages/
+*.nupkg
