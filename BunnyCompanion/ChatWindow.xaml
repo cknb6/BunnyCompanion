@@ -54,7 +54,7 @@
       <TextBlock x:Name="TitleText" Text="和小申聊聊"
                  FontSize="18" FontWeight="SemiBold" Foreground="#B65076" />
       <TextBlock x:Name="StatusText"
-                 Text="多模态 Agent · 阶跃主链 · Groq/本地自动兜底"
+                 Text="主：step-3.7 · 兜底：OpenRouter 免费模型 · 最终本地中文"
                  FontSize="11.5" Foreground="#917B85" Margin="0,3,0,0" TextWrapping="Wrap" />
     </StackPanel>
 

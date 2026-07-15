@@ -153,7 +153,7 @@ public partial class ChatWindow : Window
         {
             if (IsLoaded)
             {
-                SetBusy(false, "多模态 Agent · 阶跃主链 · Groq/本地自动兜底 · 强制中文");
+                SetBusy(false, "主 step-3.7 · OpenRouter 免费兜底 · 本地中文 · 强制中文");
                 InputBox.Focus();
             }
         }

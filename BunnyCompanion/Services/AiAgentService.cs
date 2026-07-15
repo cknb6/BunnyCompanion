@@ -16,7 +16,8 @@ public sealed record AgentResult(
     bool UsedDesktopImage);
 
 /// <summary>
-/// 多模态桌宠 Agent：阶跃主链 → Groq 兜底 → 本地关键词最终兜底。
+/// 多模态桌宠 Agent：
+/// 阶跃 step-3.7-flash → OpenRouter 免费模型 → 本地中文关键词。
 /// </summary>
 public sealed class AiAgentService
 {
@@ -73,23 +74,24 @@ public sealed class AiAgentService
 
         var systemPrompt = BuildSystemPrompt(settings);
 
-        // 1) 阶跃多模态主链
+        // 1) 主选：阶跃 step-3.7-flash（文本 + 看桌面）
         var step = await TryStepAsync(systemPrompt, historySnapshot, imageBytes, cancellationToken).ConfigureAwait(false);
         if (step is { } stepReply)
-            return Finalize(stepReply, settings, imageBytes is not null, "阶跃");
+            return Finalize(stepReply, settings, imageBytes is not null, "阶跃·3.7");
 
-        // 2) Groq 在线兜底（有图用视觉模型，否则文本）
-        var groq = await TryGroqAsync(systemPrompt, historySnapshot, imageBytes, cancellationToken).ConfigureAwait(false);
-        if (groq is { } groqReply)
-            return Finalize(groqReply, settings, imageBytes is not null, "Groq");
+        // 2) 在线兜底：OpenRouter 免费模型（key 长期有效）
+        var openRouter = await TryOpenRouterFreeAsync(systemPrompt, historySnapshot, imageBytes, cancellationToken)
+            .ConfigureAwait(false);
+        if (openRouter is { } orReply)
+            return Finalize(orReply.Reply, settings, imageBytes is not null && orReply.UsedVision, orReply.ProviderLabel);
 
-        // 3) 本地关键词最终兜底（断网 / API 失败必达）
+        // 3) 本地关键词最终兜底（断网 / 全部在线失败）
         var offline = ChatReplyService.Reply(text, settings, offlineMode: true, desktopRequested: wantDesktop && imageBytes is null);
         var offlineText = offline.Text;
         if (wantDesktop && imageBytes is null)
             offlineText = $"{offlineText}\n（没能截到桌面图，我先用本地陪伴模式陪你。）";
         else if (wantDesktop)
-            offlineText = $"{offlineText}\n（在线识别暂时不可用，已切换本地中文陪伴。）";
+            offlineText = $"{offlineText}\n（在线模型暂时不可用，已切换本地中文陪伴。）";
         else
             offlineText = $"{offlineText}\n（网络或接口不可用，已切换本地中文陪伴。）";
         return Finalize((offlineText, offline.ActionKey), settings, false, "本地");
@@ -121,85 +123,93 @@ public sealed class AiAgentService
         byte[]? imageBytes,
         CancellationToken cancellationToken)
     {
-        // 先试旗舰多模态，失败再试快模型。
-        foreach (var model in new[] { AiConfig.StepPrimaryModel, AiConfig.StepFastModel })
+        try
         {
-            try
-            {
-                var payload = BuildOpenAiPayload(
-                    model,
-                    systemPrompt,
-                    history,
-                    imageBytes,
-                    maxTokens: 900,
-                    extra: node =>
-                    {
-                        node["reasoning_effort"] = AiConfig.StepEffort;
-                    });
+            var payload = BuildOpenAiPayload(
+                AiConfig.StepModel,
+                systemPrompt,
+                history,
+                imageBytes,
+                maxTokens: 900,
+                extra: node =>
+                {
+                    node["reasoning_effort"] = AiConfig.StepEffort;
+                });
 
-                var json = await PostChatAsync(
-                    $"{AiConfig.StepBaseUrl.TrimEnd('/')}/chat/completions",
-                    AiConfig.StepApiKey,
-                    payload,
-                    cancellationToken).ConfigureAwait(false);
+            var json = await PostChatAsync(
+                $"{AiConfig.StepBaseUrl.TrimEnd('/')}/chat/completions",
+                AiConfig.StepApiKey,
+                payload,
+                cancellationToken,
+                openRouter: false).ConfigureAwait(false);
 
-                var content = ExtractAssistantText(json);
-                if (!string.IsNullOrWhiteSpace(content))
-                    return (content, InferAction(content));
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception ex) when (ex is TaskCanceledException && cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch
-            {
-                // 自动避让到下一个模型/通道。
-            }
+            var content = ExtractAssistantText(json);
+            if (!string.IsNullOrWhiteSpace(content))
+                return (content, InferAction(content));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is TaskCanceledException && cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            // 失败交给 OpenRouter / 本地。
         }
 
         return null;
     }
 
-    private async Task<(string Text, string ActionKey)?> TryGroqAsync(
+    private sealed record OpenRouterHit(
+        (string Text, string ActionKey) Reply,
+        string ProviderLabel,
+        bool UsedVision);
+
+    private async Task<OpenRouterHit?> TryOpenRouterFreeAsync(
         string systemPrompt,
         IReadOnlyList<ChatTurn> history,
         byte[]? imageBytes,
         CancellationToken cancellationToken)
     {
-        var models = imageBytes is null
-            ? new[] { AiConfig.GroqTextModel, AiConfig.GroqStrongModel }
-            : new[] { AiConfig.GroqVisionModel, AiConfig.GroqTextModel };
+        // 有图：优先免费视觉模型；无图：免费文本模型。
+        var models = imageBytes is not null
+            ? AiConfig.OpenRouterFreeVisionModels
+            : AiConfig.OpenRouterFreeTextModels;
 
         foreach (var model in models)
         {
             try
             {
-                // 文本模型不带图，避免无效请求。
-                var attachImage = imageBytes is not null && model == AiConfig.GroqVisionModel;
+                var useVision = imageBytes is not null;
                 var payload = BuildOpenAiPayload(
                     model,
                     systemPrompt,
                     history,
-                    attachImage ? imageBytes : null,
+                    useVision ? imageBytes : null,
                     maxTokens: 800);
 
                 var json = await PostChatAsync(
-                    $"{AiConfig.GroqBaseUrl.TrimEnd('/')}/chat/completions",
-                    AiConfig.GroqApiKey,
+                    $"{AiConfig.OpenRouterBaseUrl.TrimEnd('/')}/chat/completions",
+                    AiConfig.OpenRouterApiKey,
                     payload,
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken,
+                    openRouter: true).ConfigureAwait(false);
 
                 var content = ExtractAssistantText(json);
-                if (!string.IsNullOrWhiteSpace(content))
-                {
-                    if (!attachImage && imageBytes is not null)
-                        content = "（视觉通道暂不可用，我先根据你的文字来帮你）\n" + content;
-                    return (content, InferAction(content));
-                }
+                if (string.IsNullOrWhiteSpace(content))
+                    continue;
+
+                // 记录实际命中的免费模型，方便界面展示。
+                var shortName = model.Contains(':')
+                    ? model.Split(':')[0].Split('/').LastOrDefault() ?? model
+                    : model.Split('/').LastOrDefault() ?? model;
+                return new OpenRouterHit(
+                    (content, InferAction(content)),
+                    $"OpenRouter·{shortName}",
+                    useVision);
             }
             catch (OperationCanceledException)
             {
@@ -211,7 +221,7 @@ public sealed class AiAgentService
             }
             catch
             {
-                // continue
+                // 429 / 上游限流：换下一个免费模型。
             }
         }
 
@@ -294,10 +304,18 @@ public sealed class AiAgentService
         string url,
         string apiKey,
         JsonObject payload,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool openRouter = false)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, url);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+        if (openRouter)
+        {
+            // OpenRouter 建议带上应用来源，便于限流与统计。
+            request.Headers.TryAddWithoutValidation("HTTP-Referer", AiConfig.OpenRouterReferer);
+            request.Headers.TryAddWithoutValidation("X-Title", AiConfig.OpenRouterAppTitle);
+        }
+
         request.Content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
 
         using var response = await Http.SendAsync(request, cancellationToken).ConfigureAwait(false);
