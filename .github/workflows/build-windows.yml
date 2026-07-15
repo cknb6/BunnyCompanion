@@ -6,12 +6,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   publish:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,7 +26,7 @@ jobs:
         run: |
           dotnet run --project tools/OfflineFallbackCheck/OfflineFallbackCheck.csproj -c Release
 
-      - name: Publish framework-dependent single-file (small)
+      - name: Publish self-contained single-file
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -36,10 +36,10 @@ jobs:
           $size = (Get-Item -LiteralPath $exe).Length
           $mb = [Math]::Round($size / 1MB, 2)
           Write-Host "Delivery size: $mb MB"
-          if ($mb -gt 25) { throw "too large: $mb MB" }
-          if ($mb -lt 1) { throw "too small: $mb MB" }
+          if ($mb -lt 40) { throw "too small for self-contained: $mb MB" }
 
       - name: Stage dist
+        id: stage
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -49,15 +49,30 @@ jobs:
             Where-Object { $_.Name -eq "可直接发送" } |
             Select-Object -First 1
           if (-not $delivery) { throw "delivery folder missing" }
-          Copy-Item -LiteralPath (Join-Path $delivery.FullName "小申陪伴.exe") (Join-Path $stage "XiaoShenCompanion.exe")
-          Copy-Item -LiteralPath (Join-Path $delivery.FullName "小申陪伴.exe") (Join-Path $stage "BunnyCompanion-win-x64.exe")
-          Copy-Item -LiteralPath (Join-Path $delivery.FullName "使用说明.txt") (Join-Path $stage "README-zh.txt") -ErrorAction SilentlyContinue
-          Copy-Item -LiteralPath (Join-Path $delivery.FullName "版本校验.txt") (Join-Path $stage "checksum.txt") -ErrorAction SilentlyContinue
+
+          $cnExe = Join-Path $delivery.FullName "小申陪伴.exe"
+          Copy-Item -LiteralPath $cnExe (Join-Path $stage "XiaoShenCompanion.exe")
+          Copy-Item -LiteralPath $cnExe (Join-Path $stage "BunnyCompanion-win-x64.exe")
+          # 中文文件名副本（部分客户端可用）
+          Copy-Item -LiteralPath $cnExe (Join-Path $stage "XiaoShen-Companion.exe")
+
+          if (Test-Path (Join-Path $delivery.FullName "使用说明.txt")) {
+            Copy-Item -LiteralPath (Join-Path $delivery.FullName "使用说明.txt") (Join-Path $stage "README-zh.txt")
+          }
+          if (Test-Path (Join-Path $delivery.FullName "版本校验.txt")) {
+            Copy-Item -LiteralPath (Join-Path $delivery.FullName "版本校验.txt") (Join-Path $stage "checksum.txt")
+          }
+
           $hash = (Get-FileHash (Join-Path $stage "BunnyCompanion-win-x64.exe") -Algorithm SHA256).Hash
           $size = (Get-Item (Join-Path $stage "BunnyCompanion-win-x64.exe")).Length
+          $mb = [Math]::Round($size / 1MB, 2)
           "SHA256=$hash" | Set-Content (Join-Path $stage "artifact-info.txt")
-          "SIZE=$size" | Add-Content (Join-Path $stage "artifact-info.txt")
+          "SIZE_BYTES=$size" | Add-Content (Join-Path $stage "artifact-info.txt")
+          "SIZE_MB=$mb" | Add-Content (Join-Path $stage "artifact-info.txt")
           Get-ChildItem $stage | Format-Table Name, Length
+
+          "TAG=v1.1.$env:GITHUB_RUN_NUMBER" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "SIZE_MB=$mb" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -65,4 +80,36 @@ jobs:
           name: BunnyCompanion-win-x64
           path: dist/*
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: 小申陪伴 ${{ env.TAG }}
+          body: |
+            ## 小申陪伴 Windows 自包含版
+
+            - 架构：win-x64
+            - 体积：约 ${{ env.SIZE_MB }} MB
+            - **无需安装 .NET**，下载 EXE 后双击运行
+            - 若 SmartScreen 拦截：更多信息 → 仍要运行
+
+            ### 下载建议
+            - `BunnyCompanion-win-x64.exe` 或 `XiaoShenCompanion.exe`（同一文件）
+            - `README-zh.txt` 使用说明
+            - `checksum.txt` / `artifact-info.txt` 校验信息
+
+            提交：`${{ github.sha }}`
+          files: |
+            dist/BunnyCompanion-win-x64.exe
+            dist/XiaoShenCompanion.exe
+            dist/XiaoShen-Companion.exe
+            dist/README-zh.txt
+            dist/checksum.txt
+            dist/artifact-info.txt
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

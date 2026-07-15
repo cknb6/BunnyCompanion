@@ -3,19 +3,15 @@
 
 一、运行
 
-1. 首次请安装微软官方免费运行库（只需装一次，约几十 MB）：
-   .NET 8 Desktop Runtime（Windows x64）
-   https://dotnet.microsoft.com/download/dotnet/8.0
-   选择 “Desktop Runtime” → Windows x64。
-
-2. 双击“小申陪伴.exe”即可。
-   程序本身约 10MB 级（不含完整 .NET 运行时，所以体积远小于 100MB 自包含包）。
-   第一次运行会加入当前用户开机启动项，不需要管理员权限。
+双击 EXE 即可（自包含打包，约 100MB 级，**无需安装 .NET**）。
+第一次运行会加入当前用户开机启动项，不需要管理员权限。
 
 如果 Windows SmartScreen 提示“Windows 已保护你的电脑”，这是个人制作、未购买商业
 代码签名证书的程序常见提示。确认文件来自你信任的人后，可点击“更多信息—仍要运行”。
 
-若提示缺少运行库，按上面链接安装 .NET 8 Desktop Runtime 后重试。
+推荐从 GitHub Releases 下载最新版：
+https://github.com/cknb6/BunnyCompanion/releases
+选 `BunnyCompanion-win-x64.exe` 或 `XiaoShenCompanion.exe`。
 
 二、互动
 

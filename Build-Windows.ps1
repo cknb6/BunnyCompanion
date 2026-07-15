@@ -32,16 +32,16 @@ Remove-Item $DeliveryDirectory -Recurse -Force -ErrorAction SilentlyContinue
 New-Item $PublishDirectory -ItemType Directory -Force | Out-Null
 New-Item $DeliveryDirectory -ItemType Directory -Force | Out-Null
 
-Write-Host "正在发布 $Runtime 框架依赖单文件版本（小体积，约 10MB 级）……" -ForegroundColor Cyan
+Write-Host "正在发布 $Runtime 自包含单文件版本……" -ForegroundColor Cyan
 & dotnet publish $ProjectFile `
     --configuration $Configuration `
     --runtime $Runtime `
-    --self-contained false `
+    --self-contained true `
     --output $PublishDirectory `
     -p:PublishSingleFile=true `
     -p:IncludeNativeLibrariesForSelfExtract=true `
     -p:EnableCompressionInSingleFile=true `
-    -p:PublishReadyToRun=false `
+    -p:PublishReadyToRun=true `
     -p:PublishTrimmed=false `
     -p:DebugType=None `
     -p:DebugSymbols=false
@@ -65,12 +65,9 @@ if ($UnexpectedFiles.Count -gt 0) {
 
 $SizeBytes = (Get-Item -LiteralPath $PublishedExe).Length
 $SizeMb = [Math]::Round(($SizeBytes / 1048576.0), 2)
-# 框架依赖包通常数 MB～20MB；过大说明误开了自包含
-if ($SizeMb -gt 25) {
-    throw "产物过大（$SizeMb MB），疑似仍为自包含或资源膨胀，已停止交付。"
-}
-if ($SizeMb -lt 1) {
-    throw "产物过小（$SizeMb MB），可能发布失败。"
+# 自包含 WPF 通常明显大于 40MB
+if ($SizeMb -lt 40) {
+    throw "产物过小（$SizeMb MB），疑似不是自包含包，已停止交付。"
 }
 
 $FriendlyExe = Join-Path $DeliveryDirectory "小申陪伴.exe"
@@ -79,15 +76,14 @@ Copy-Item (Join-Path $ProjectRoot "使用说明.txt") $DeliveryDirectory
 
 $Hash = (Get-FileHash $FriendlyExe -Algorithm SHA256).Hash
 $BuildInfo = @"
-小申陪伴 1.1（框架依赖 · 小体积）
+小申陪伴 1.1（自包含 · 免装 .NET）
 构建时间：$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
 运行架构：$Runtime
 文件大小：$SizeMb MB
 SHA256：$Hash
-说明：需安装 .NET 8 Desktop Runtime（x64）
 "@
 $BuildInfo | Set-Content (Join-Path $DeliveryDirectory "版本校验.txt") -Encoding UTF8
 
 Write-Host ""
 Write-Host "构建成功：$FriendlyExe （$SizeMb MB）" -ForegroundColor Green
-Write-Host "目标电脑需安装 .NET 8 Desktop Runtime：https://dotnet.microsoft.com/download/dotnet/8.0" -ForegroundColor Yellow
+Write-Host "对方无需安装 .NET，直接双击运行。" -ForegroundColor Green
