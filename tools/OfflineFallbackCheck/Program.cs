@@ -41,7 +41,7 @@ var diversitySettings = new PetSettings
 var distinct = new HashSet<string>(StringComparer.Ordinal);
 for (var i = 0; i < 60; i++)
 {
-    var reply = ChatReplyService.Reply($"zzzz_no_keyword_hit_xyz_{i}_{Guid.NewGuid():N}", diversitySettings, offlineMode: true);
+    var reply = ChatReplyService.Reply($"无匹配输入_{i}_※※※", diversitySettings, offlineMode: true);
     if (string.IsNullOrWhiteSpace(reply.Text))
         throw new Exception("无关键词命中出现空回复");
     distinct.Add(reply.Text);
