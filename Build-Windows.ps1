@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet("win-x64", "win-arm64")]
+    [ValidateSet("win-x64", "win-arm64", "win-x86")]
     [string]$Runtime = "win-x64",
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Release"
@@ -11,6 +11,7 @@ try {
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
     $OutputEncoding = [System.Text.Encoding]::UTF8
 } catch { }
+
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectFile = Join-Path $ProjectRoot "BunnyCompanion\BunnyCompanion.csproj"
 $PublishDirectory = Join-Path $ProjectRoot "发布\$Runtime"
@@ -26,13 +27,28 @@ if ($SdkMajor -lt 8) {
     throw "当前 .NET SDK 版本为 $SdkVersion，需要 .NET 8 或更高版本。"
 }
 
-Write-Host "正在清理旧文件……" -ForegroundColor DarkGray
-Remove-Item $PublishDirectory -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item $DeliveryDirectory -Recurse -Force -ErrorAction SilentlyContinue
-New-Item $PublishDirectory -ItemType Directory -Force | Out-Null
-New-Item $DeliveryDirectory -ItemType Directory -Force | Out-Null
+# 每个架构一个友好文件名，避免同一文件复制多份
+$FriendlyName = switch ($Runtime) {
+    "win-x64" { "小申陪伴-x64.exe" }
+    "win-arm64" { "小申陪伴-arm64.exe" }
+    "win-x86" { "小申陪伴-x86.exe" }
+    default { "小申陪伴.exe" }
+}
+$EnglishName = switch ($Runtime) {
+    "win-x64" { "BunnyCompanion-win-x64.exe" }
+    "win-arm64" { "BunnyCompanion-win-arm64.exe" }
+    "win-x86" { "BunnyCompanion-win-x86.exe" }
+    default { "BunnyCompanion.exe" }
+}
 
-Write-Host "正在发布 $Runtime 自包含单文件版本……" -ForegroundColor Cyan
+Write-Host "正在清理 $Runtime ……" -ForegroundColor DarkGray
+Remove-Item $PublishDirectory -Recurse -Force -ErrorAction SilentlyContinue
+if (-not (Test-Path $DeliveryDirectory)) {
+    New-Item $DeliveryDirectory -ItemType Directory -Force | Out-Null
+}
+New-Item $PublishDirectory -ItemType Directory -Force | Out-Null
+
+Write-Host "正在发布 $Runtime 自包含单文件……" -ForegroundColor Cyan
 & dotnet publish $ProjectFile `
     --configuration $Configuration `
     --runtime $Runtime `
@@ -44,15 +60,16 @@ Write-Host "正在发布 $Runtime 自包含单文件版本……" -ForegroundCol
     -p:PublishReadyToRun=true `
     -p:PublishTrimmed=false `
     -p:DebugType=None `
-    -p:DebugSymbols=false
+    -p:DebugSymbols=false `
+    -p:RuntimeIdentifier=$Runtime
 
 if ($LASTEXITCODE -ne 0) {
-    throw "dotnet publish 失败，请查看上方编译错误。"
+    throw "dotnet publish 失败。"
 }
 
 $PublishedExe = Join-Path $PublishDirectory "BunnyCompanion.exe"
 if (-not (Test-Path $PublishedExe)) {
-    throw "发布完成但未找到 BunnyCompanion.exe。"
+    throw "未找到 BunnyCompanion.exe。"
 }
 
 $UnexpectedFiles = @(Get-ChildItem $PublishDirectory -File -Recurse | Where-Object {
@@ -60,30 +77,41 @@ $UnexpectedFiles = @(Get-ChildItem $PublishDirectory -File -Recurse | Where-Obje
 })
 if ($UnexpectedFiles.Count -gt 0) {
     $Names = ($UnexpectedFiles | Select-Object -ExpandProperty Name) -join "、"
-    throw "发布目录仍存在未嵌入的运行文件：$Names。"
+    throw "发布目录仍有未嵌入文件：$Names"
 }
 
-$SizeBytes = (Get-Item -LiteralPath $PublishedExe).Length
-$SizeMb = [Math]::Round(($SizeBytes / 1048576.0), 2)
-# 自包含 WPF 通常明显大于 40MB
+$SizeMb = [Math]::Round(((Get-Item -LiteralPath $PublishedExe).Length / 1048576.0), 2)
 if ($SizeMb -lt 40) {
-    throw "产物过小（$SizeMb MB），疑似不是自包含包，已停止交付。"
+    throw "产物过小（$SizeMb MB），疑似不是自包含包。"
 }
 
-$FriendlyExe = Join-Path $DeliveryDirectory "小申陪伴.exe"
-Copy-Item $PublishedExe $FriendlyExe
-Copy-Item (Join-Path $ProjectRoot "使用说明.txt") $DeliveryDirectory
+$FriendlyExe = Join-Path $DeliveryDirectory $FriendlyName
+$EnglishExe = Join-Path $DeliveryDirectory $EnglishName
+Copy-Item $PublishedExe $FriendlyExe -Force
+Copy-Item $PublishedExe $EnglishExe -Force
 
-$Hash = (Get-FileHash $FriendlyExe -Algorithm SHA256).Hash
-$BuildInfo = @"
-小申陪伴 1.1（自包含 · 免装 .NET）
-构建时间：$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-运行架构：$Runtime
-文件大小：$SizeMb MB
+# 说明与校验（多架构时追加写入）
+$ReadmeSrc = Join-Path $ProjectRoot "使用说明.txt"
+if (Test-Path $ReadmeSrc) {
+    Copy-Item $ReadmeSrc (Join-Path $DeliveryDirectory "使用说明.txt") -Force
+}
+
+$Hash = (Get-FileHash $EnglishExe -Algorithm SHA256).Hash
+$CheckPath = Join-Path $DeliveryDirectory "版本校验.txt"
+$Line = @"
+[$Runtime]
+文件（中文名）：$FriendlyName
+文件（英文名）：$EnglishName
+大小：$SizeMb MB
 SHA256：$Hash
-"@
-$BuildInfo | Set-Content (Join-Path $DeliveryDirectory "版本校验.txt") -Encoding UTF8
+构建时间：$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
 
-Write-Host ""
-Write-Host "构建成功：$FriendlyExe （$SizeMb MB）" -ForegroundColor Green
-Write-Host "对方无需安装 .NET，直接双击运行。" -ForegroundColor Green
+"@
+if (Test-Path $CheckPath) {
+    Add-Content -LiteralPath $CheckPath -Value $Line -Encoding UTF8
+} else {
+    $Header = "小申陪伴 1.1（自包含 · 免装 .NET）`n每架构一个 EXE，请按电脑 CPU 选择下载。`n`n"
+    Set-Content -LiteralPath $CheckPath -Value ($Header + $Line) -Encoding UTF8
+}
+
+Write-Host "完成：$FriendlyExe / $EnglishExe （$SizeMb MB）" -ForegroundColor Green

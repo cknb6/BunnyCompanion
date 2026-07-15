@@ -1,163 +1,109 @@
 # 小申陪伴（BunnyCompanion）
 
-面向 **Windows 10/11** 的桌面宠物：透明置顶、托盘控制、点击互动、粉嫩气泡，以及可聊天 / 看桌面的多模态 Agent。
+面向 **Windows 10/11** 的桌面宠物：透明置顶、托盘、点击互动、粉嫩气泡，以及可聊天 / 看桌面的多模态 Agent。
 
-- 语言 / 框架：**C# · WPF · .NET 8**
-- 仓库：[`cknb6/BunnyCompanion`](https://github.com/cknb6/BunnyCompanion)（公开）
-- 下载安装包：**[Releases](https://github.com/cknb6/BunnyCompanion/releases)**（Action 自动打包并发布）
-
----
-
-## 下载与运行
-
-1. 打开 [Releases](https://github.com/cknb6/BunnyCompanion/releases)
-2. 下载最新版中的其一即可（内容相同）：
-   - `BunnyCompanion-win-x64.exe`
-   - `XiaoShenCompanion.exe`
-3. 双击运行
-
-**自包含单文件**：体积大约 **100MB 级**，已内置 .NET 桌面运行时，**对方无需再安装 .NET**。
-
-若 Windows SmartScreen 提示未知发布者：点「更多信息」→「仍要运行」（个人项目未购买代码签名证书时的常见提示）。
-
-也可参考仓库内 `使用说明.txt`。
+| | |
+|--|--|
+| 技术 | C# · WPF · .NET 8 |
+| 仓库 | [cknb6/BunnyCompanion](https://github.com/cknb6/BunnyCompanion) |
+| 下载 | **[Releases](https://github.com/cknb6/BunnyCompanion/releases)**（Action 自动打包发布） |
 
 ---
 
-## 功能一览
+## 下载哪个文件？
 
-| 类别 | 内容 |
-|------|------|
-| 桌宠壳 | 透明无边框、始终置顶、系统托盘、启动入场动画 |
-| 素材 | 48 个透明动作（待机 / 走 / 跳 / 摸头 / 比心 / 睡 / 读 / 喝水 / 生日等） |
-| 点击 | 头 / 身 / 脚分区反馈；双击比心；中键打开聊天；拖拽移动；右键菜单 |
-| 命中 | 按精灵透明度做像素级命中，空白区域不挡桌面点击 |
-| 快捷键 | `Ctrl+Shift+S` 显隐 · `C` 聊天 · `P` 穿透 · `,` 设置 · `H` 帮助 |
-| 行为 | 自动散步与动作互斥、多显示器 DPI、全屏可自动隐藏 |
-| 气泡 | 渐变描边阴影 + 淡入上浮 |
-| 陪伴 | 喝水 / 休息提醒、25 分钟专注、生日与纪念日、安静时段、开机启动 |
-| 数据 | 爱心值、互动次数、位置与设置保存在本机；单实例 |
+Release 里按 **CPU 架构** 提供 **两个** 自包含 EXE（不是同一个文件复制很多遍）：
 
-### Agent 对话链路
+| 下载这个 | 适合谁 |
+|----------|--------|
+| **BunnyCompanion-win-x64.exe** | **绝大多数电脑**（Intel / AMD）。Windows on ARM 多数也能靠兼容层运行 x64 版 |
+| **BunnyCompanion-win-arm64.exe** | **原生 ARM64** 的 Windows 设备（部分 Surface / 骁龙本），要更好性能时选它 |
+
+另外可能带有中文名 `小申陪伴-x64.exe` / `小申陪伴-arm64.exe`，与对应英文名是**同一架构各一份**。
+
+- **一般用户：只下 x64 即可。**  
+- **不要**以为要下齐所有 exe；以前 Release 里多个英文名曾是**同一 x64 文件的重复拷贝**，现已改成「一架构一文件」。
+
+### 运行
+
+- **自包含**，体积大约 **70～100MB / 每个架构**  
+- **无需安装 .NET**，双击运行  
+- SmartScreen：更多信息 → 仍要运行  
+
+说明文件：`使用说明.txt` / Release 中的 `README-zh.txt`。
+
+---
+
+## 为什么不能「一个 EXE 通吃 x86 + ARM」？
+
+| 说法 | 实际情况 |
+|------|----------|
+| 自包含 .NET / WPF | 必须按 **RID** 分别发布：`win-x64`、`win-arm64`（以及少见的 `win-x86`） |
+| 一个「通用原生」EXE | **做不到**（Windows 不是 macOS 那种 fat binary 生态） |
+| 多数安卓/商店「通用」 | 往往是安装包内含多架构，安装时再选，不是单个自包含 WPF EXE |
+
+因此本仓库采用：**同一 Release 里放 x64 + arm64 两个包**，下载时选一个。
+
+---
+
+## 功能概要
+
+- 透明置顶、托盘、启动动画、48 个透明动作  
+- 头/身/脚点击分区、双击比心、中键聊天、拖拽、右键菜单  
+- 像素级透明命中（空白不挡桌面）  
+- 快捷键：`Ctrl+Shift` + `S` 显隐 / `C` 聊天 / `P` 穿透 / `,` 设置 / `H` 帮助  
+- 自动行为、多显示器 DPI、全屏可隐藏、喝水/休息提醒、专注 25 分钟、纪念日  
+- 本地保存设置与爱心值；单实例  
+
+### Agent
 
 ```text
 阶跃 step-3.7-flash（主：聊天 + 看桌面）
-    → OpenRouter 免费模型（在线兜底）
-    → 本地中文关键词（断网 / 全挂时）
+  → OpenRouter 免费模型（在线兜底）
+  → 本地中文关键词（断网兜底）
 ```
 
-- 看桌面为**用户主动触发**（聊天窗「看桌面」或相关意图），非后台连环截屏
-- 回复强制**简体中文**（系统提示约束）
+看桌面需用户主动触发，不会后台连环截屏。
 
 ---
 
-## 快捷键
+## 本地构建
 
-| 组合 | 作用 |
-|------|------|
-| `Ctrl+Shift+S` | 显示 / 隐藏桌宠 |
-| `Ctrl+Shift+C` | 打开聊天 |
-| `Ctrl+Shift+P` | 切换鼠标穿透 |
-| `Ctrl+Shift+,` | 个性化设置 |
-| `Ctrl+Shift+H` | 快捷键说明 |
-
-与托盘菜单语义一致。
-
----
-
-## 目录结构
-
-```text
-BunnyCompanion/
-├─ BunnyCompanion.sln
-├─ BunnyCompanion/                 # WPF 主项目
-│  ├─ Assets/Sprites/              # 48 个透明精灵
-│  ├─ Engine/                      # 动作目录
-│  ├─ Models/                      # 本地设置
-│  └─ Services/                    # Agent / 屏幕 / 启动项 / 热键等
-├─ Artwork/                        # 角色母版与动作表（设计用）
-├─ tools/                          # 校验与素材工具
-├─ .github/workflows/              # Windows 打包 + 自动 Release
-├─ Build-Windows.ps1
-├─ 一键构建Windows版.bat
-└─ 使用说明.txt
-```
-
-参考照片只用于角色设计，不打进 EXE。`Artwork` 中为衍生 Q 版素材。
-
----
-
-## 本地构建（可选）
-
-环境任选其一：
-
-- Visual Studio 2022（「.NET 桌面开发」工作负载），或  
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
+需要 .NET 8 SDK 或 VS2022「.NET 桌面开发」。
 
 ```bat
 一键构建Windows版.bat
 ```
 
-或：
+或指定架构：
 
 ```powershell
-.\Build-Windows.ps1 -Runtime win-x64 -Configuration Release
+.\Build-Windows.ps1 -Runtime win-x64
+.\Build-Windows.ps1 -Runtime win-arm64
 ```
 
-成功后产物：
-
-```text
-可直接发送/小申陪伴.exe
-可直接发送/使用说明.txt
-可直接发送/版本校验.txt
-```
-
-默认 **`SelfContained=true` 单文件**：约 100MB 级，接收者免装 .NET。
+产物目录：`可直接发送\`。
 
 ---
 
-## CI / Release
+## CI
 
-- 工作流：`.github/workflows/build-windows.yml`
-- 触发：`push` 到 `main` 或手动 `workflow_dispatch`
-- 步骤：校验 → `Build-Windows.ps1` 自包含发布 → 上传 Artifact → **自动创建 GitHub Release**（tag 形如 `v1.1.<run_number>`）
+- 工作流：`.github/workflows/build-windows.yml`  
+- 矩阵构建：`win-x64` + `win-arm64`  
+- 成功后自动 **GitHub Release**（tag `v1.1.<run_number>`）  
 
-查看运行记录：[Actions](https://github.com/cknb6/BunnyCompanion/actions)  
-下载成品：[Releases](https://github.com/cknb6/BunnyCompanion/releases)
+[Actions](https://github.com/cknb6/BunnyCompanion/actions) · [Releases](https://github.com/cknb6/BunnyCompanion/releases)
 
 ---
 
 ## 本地数据
 
-| 项目 | 位置 |
-|------|------|
-| 设置 / 爱心值 / 位置 | `%LocalAppData%\BunnyCompanion\settings.json` |
-| 崩溃日志 | `%LocalAppData%\BunnyCompanion\Logs\` |
-| 开机启动 | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`（仅当前用户） |
-
-不写系统目录、不要求管理员权限。
-
----
-
-## 增加动作
-
-1. 将透明 PNG 放入 `BunnyCompanion/Assets/Sprites`
-2. 在 `Engine/PetActionCatalog.cs` 注册帧与时长
-3. 在托盘菜单或随机行为中增加入口
-4. 重新构建 / 等 Action 出包
-
-推荐 **384×384 RGBA PNG**，脚底基线对齐。
-
----
-
-## 说明
-
-- 体积偏大是因为 **自包含** 打包把 .NET / WPF 运行时打进 EXE，以便双击即用。
-- 若改为框架依赖可把 EXE 压到约 10MB 级，但对方必须另装 [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)。
-- 密钥写在源码中时请注意公开仓库可见；不需要的 key 请自行轮换。
+- 设置：`%LocalAppData%\BunnyCompanion\settings.json`  
+- 日志：`%LocalAppData%\BunnyCompanion\Logs\`  
+- 开机启动：当前用户 `HKCU\...\Run`  
 
 ---
 
 ## License
 
-私人 / 礼物用途以仓库说明为准；转载与商用请先取得授权。
+以仓库说明为准；转载 / 商用请先授权。

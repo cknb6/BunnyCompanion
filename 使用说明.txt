@@ -11,7 +11,11 @@
 
 推荐从 GitHub Releases 下载最新版：
 https://github.com/cknb6/BunnyCompanion/releases
-选 `BunnyCompanion-win-x64.exe` 或 `XiaoShenCompanion.exe`。
+
+请按电脑选择（每个架构只要下一个）：
+- 普通 Intel/AMD 电脑 → BunnyCompanion-win-x64.exe（或 小申陪伴-x64.exe）
+- 原生 ARM64 Windows → BunnyCompanion-win-arm64.exe（或 小申陪伴-arm64.exe）
+不确定时优先下 x64。
 
 二、互动
 
@@ -34,7 +38,7 @@ Ctrl+Shift+H　快捷键说明
 四、主要功能
 
 透明无边框、置顶显示、启动入场动画、自动散步、48 个动作素材、粉嫩对话气泡、
-多模态 Agent 对话（阶跃主链 → Groq → 本地中文兜底）、系统托盘、角色缩放、
+多模态 Agent 对话（step-3.7 → OpenRouter 免费 → 本地中文兜底）、系统托盘、角色缩放、
 鼠标穿透、多显示器边界保护、全屏自动隐藏、喝水提醒、休息提醒、
 25 分钟专注陪伴、生日与纪念日彩蛋、安静时段、提示音、互动次数与爱心值记录。
 
