@@ -110,7 +110,14 @@ SHA256：$Hash
 if (Test-Path $CheckPath) {
     Add-Content -LiteralPath $CheckPath -Value $Line -Encoding UTF8
 } else {
-    $Header = "小申陪伴 1.1（自包含 · 免装 .NET）`n每架构一个 EXE，请按电脑 CPU 选择下载。`n`n"
+    # 版本号从 csproj 读取，避免与程序内不一致
+    $Csproj = Join-Path $ProjectRoot "BunnyCompanion\BunnyCompanion.csproj"
+    $Ver = "0.0.0"
+    if (Test-Path $Csproj) {
+        $m = [regex]::Match((Get-Content $Csproj -Raw), '<Version>([^<]+)</Version>')
+        if ($m.Success) { $Ver = $m.Groups[1].Value }
+    }
+    $Header = "小申陪伴 $Ver（自包含 · 免装 .NET）`n每架构一个 EXE，请按电脑 CPU 选择下载。`n`n"
     Set-Content -LiteralPath $CheckPath -Value ($Header + $Line) -Encoding UTF8
 }
 

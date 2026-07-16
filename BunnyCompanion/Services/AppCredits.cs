@@ -8,7 +8,22 @@ public static class AppCredits
     public const string Developer = "传康KK";
     public const string DeveloperAlias = "传康Kk（万能程序员）";
     public const string ProductName = "小申陪伴";
-    public const string VersionLabel = "1.1";
+    /// <summary>版本号：单一来源为 csproj 的 &lt;Version&gt;，这里运行时读取程序集版本，避免多处硬编码不一致。</summary>
+    public static string VersionLabel { get; } = ComputeVersionLabel();
+
+    private static string ComputeVersionLabel()
+    {
+        try
+        {
+            var v = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+            // 程序集版本形如 1.2.0.0，去掉末尾的 .0 更友好
+            return v is { } ver ? $"{ver.Major}.{ver.Minor}.{ver.Build}" : "1.0";
+        }
+        catch
+        {
+            return "1.0";
+        }
+    }
 
     /// <summary>用户可见的一句话声明。</summary>
     public const string DevelopedByLine = "本软件由传康KK开发";

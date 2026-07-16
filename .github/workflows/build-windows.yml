@@ -140,7 +140,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG="v1.1.${{ github.run_number }}"
+          # 主版本从 csproj 的 <Version> 读取（单一来源），补丁号用 run_number 区分每次构建
+          APP_VERSION="$(grep -oP '(?<=<Version>)[^<]+' BunnyCompanion/BunnyCompanion.csproj || true)"
+          APP_VERSION="${APP_VERSION:-0.0.0}"
+          TAG="v${APP_VERSION}.${{ github.run_number }}"
           TITLE="小申陪伴 ${TAG}"
           TARGET="${{ github.sha }}"
 
