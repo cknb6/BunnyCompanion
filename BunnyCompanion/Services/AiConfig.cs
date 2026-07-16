@@ -16,11 +16,20 @@ internal static class AiConfig
     /// <summary>推理强度：low。过小 max_tokens 时 reasoning 会占满导致 content 为空。</summary>
     public const string StepEffort = "low";
 
-    // ---------- 阶跃语音（TTS / ASR，复用 StepApiKey，界面不暴露接口名） ----------
-    public const string StepTtsModel = "step-tts-mini";
+    // ---------- 阶跃语音（仅女声；无效音色勿写，否则会失败） ----------
+    public const string StepTtsModel = "step-tts-vivid";
     public const string StepAsrModel = "stepaudio-2.5-asr";
-    /// <summary>默认音色：温柔女声；失败时回退系统 SAPI。</summary>
-    public const string StepTtsVoice = "younvwangsheng";
+    /// <summary>知性姐姐（御姐感）。仅女声。</summary>
+    public const string StepTtsVoice = "zhixingjiejie";
+    public const double StepTtsSpeed = 1.05;
+    /// <summary>女声回退链（禁止任何男声 id）。</summary>
+    public static readonly string[] StepTtsFemaleVoices =
+    [
+        "zhixingjiejie", // 知性姐姐
+        "wenrounvsheng", // 温柔甜美
+        "qinqienvsheng", // 亲切
+        "linjiajiejie",  // 邻家姐姐
+    ];
 
     // ---------- OpenRouter 免费模型（在线兜底，只保留极少数，避免串行卡死） ----------
     public const string OpenRouterBaseUrl = "https://openrouter.ai/api/v1";

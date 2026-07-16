@@ -94,6 +94,7 @@ internal static class AgentSystemPrompt
             5. 禁止假装已执行工具：没有 tool 结果就不要说「已经帮你删了/移了」。
             6. **绝对禁止**在回复正文输出 `<tool_call>`、`<function=`、`<parameter=`、XML/标签伪代码。
                调用工具只能走 API 的 tools/tool_calls 字段；正文只允许温柔中文。
+            7. 聊天气泡不支持 Markdown：禁止使用 **加粗**、*斜体*、# 标题、``` 代码围栏装饰；用口语和换行即可。
 
             # 长期记忆与备忘
             - 系统会注入两层记忆：

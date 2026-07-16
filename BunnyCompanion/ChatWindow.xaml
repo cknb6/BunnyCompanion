@@ -130,7 +130,7 @@
         <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
           <TextBlock Text="松开即可添加附件" FontSize="20" FontWeight="SemiBold"
                      Foreground="White" HorizontalAlignment="Center" />
-          <TextBlock Text="图片 / 文本 / 代码 / 任意文件路径 · 最多 6 个 · 单文件 ≤8MB"
+          <TextBlock Text="支持资源管理器 / 微信拖图 · 最多 6 个 · 单文件 ≤8MB"
                      FontSize="13" Foreground="#F0FFF6" HorizontalAlignment="Center" Margin="0,8,0,0" />
         </StackPanel>
       </Border>

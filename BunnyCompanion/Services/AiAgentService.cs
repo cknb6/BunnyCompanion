@@ -195,15 +195,54 @@ public sealed class AiAgentService
 
             var toolTrace = new List<string>();
 
-            // 本地意图预取：定位/天气在模型不会 tool-call 时仍能答对
+            // 本地意图预取：定位/天气等；有预取时优先「无 tools 阶跃」总结，避免空 content+再掉备用线路
             var prefetch = await MaybePrefetchLocalFactsAsync(text, progress, cancellationToken).ConfigureAwait(false);
-            if (!string.IsNullOrWhiteSpace(prefetch))
+            var hasPrefetch = !string.IsNullOrWhiteSpace(prefetch);
+            if (hasPrefetch)
             {
-                systemPrompt += "\n\n# 本回合已预取的真实数据（请直接采用，勿编造）\n" + prefetch;
+                systemPrompt += "\n\n# 本回合已预取的真实数据（必须直接采用，禁止编造数字/城市）\n" + prefetch;
+                systemPrompt += "\n\n【重要】上面已有真实工具结果。请用温柔中文直接回答用户，不要再调用工具，不要输出 XML/标签。";
                 toolTrace.Add("prefetch");
             }
 
-            // 1) 阶跃 + tools（主路径，必须快成功；失败才短兜底）
+            // 1a) 已有预取：阶跃纯文本总结（无 tools）—— 天气/定位芯片的主路径
+            if (hasPrefetch)
+            {
+                progress?.Report("在线整理中…");
+                var stepPrefetch = await TryAgentLoopAsync(
+                    providerLabel: "阶跃·3.7",
+                    baseUrl: AiConfig.StepBaseUrl,
+                    apiKey: AiConfig.StepApiKey,
+                    model: AiConfig.StepModel,
+                    openRouter: false,
+                    systemPrompt: systemPrompt,
+                    history: historySnapshot,
+                    images: Array.Empty<ImageInput>(),
+                    maxTokens: AiConfig.StepDefaultMaxTokens,
+                    enableTools: false,
+                    progress: progress,
+                    toolTrace: toolTrace,
+                    extra: node => node["reasoning_effort"] = AiConfig.StepEffort,
+                    requestTimeoutSeconds: Math.Min(AiConfig.StepRequestTimeoutSeconds, 28),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                if (stepPrefetch is { } sp0)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return Finalize((sp0.Text, InferAction(sp0.Text)), settings,
+                        usedVisual: false, usedDesktop: false,
+                        sp0.Provider, toolTrace, pendingUserTurn, userText: text);
+                }
+
+                // 阶跃总结失败：直接用预取数据本地口语化，绝不为此再去备用线路拖很久
+                progress?.Report("用本机结果回答…");
+                var localFromPrefetch = FormatPrefetchAsCompanionReply(prefetch!, settings.PartnerName);
+                cancellationToken.ThrowIfCancellationRequested();
+                return Finalize((localFromPrefetch, InferAction(localFromPrefetch)), settings,
+                    usedVisual: false, usedDesktop: false,
+                    "阶跃·预取", toolTrace, pendingUserTurn, userText: text);
+            }
+
+            // 1b) 无预取：阶跃 + tools（文件/命令/通用 Agent）
             progress?.Report("在线思考中…");
             var step = await TryAgentLoopAsync(
                 providerLabel: "阶跃·3.7",
@@ -229,7 +268,7 @@ public sealed class AiAgentService
                     s.Provider, toolTrace, pendingUserTurn, userText: text);
             }
 
-            // 2) 阶跃纯文本再试一次（无 tools，往往更快出 content）
+            // 2) 阶跃纯文本再试（无 tools）
             progress?.Report("阶跃换种方式再试…");
             var stepPlain = await TryAgentLoopAsync(
                 providerLabel: "阶跃·3.7",
@@ -255,14 +294,14 @@ public sealed class AiAgentService
                     sp.Provider, toolTrace, pendingUserTurn, userText: text);
             }
 
-            // 3) OpenRouter 仅 1 个免费模型短超时（禁止再串行试一堆 120s）
+            // 3) 备用线路：仅纯闲聊/看图等无预取时，短超时 1 次
             foreach (var model in images.Count > 0
                          ? AiConfig.OpenRouterFreeVisionModels
                          : AiConfig.OpenRouterFreeTextModels)
             {
                 progress?.Report("备用线路…");
                 var hit = await TryAgentLoopAsync(
-                    providerLabel: $"OpenRouter·{ShortModel(model)}",
+                    providerLabel: $"备用·{ShortModel(model)}",
                     baseUrl: AiConfig.OpenRouterBaseUrl,
                     apiKey: AiConfig.OpenRouterApiKey,
                     model: model,
@@ -271,7 +310,7 @@ public sealed class AiAgentService
                     history: historySnapshot,
                     images: images,
                     maxTokens: AiConfig.FallbackMaxTokens,
-                    enableTools: false, // 免费模型 tools 不稳，且会拖慢；预取数据已够
+                    enableTools: false,
                     progress: progress,
                     toolTrace: toolTrace,
                     extra: null,
@@ -286,12 +325,10 @@ public sealed class AiAgentService
                 }
             }
 
-            // 4) 本地关键词 + 预取数据拼装
+            // 4) 本地关键词
             var offline = ChatReplyService.Reply(text, settings, offlineMode: true, desktopRequested: wantDesktop);
             var offlineText = offline.Text;
-            if (!string.IsNullOrWhiteSpace(prefetch))
-                offlineText = $"{offlineText}\n\n——\n{FormatPrefetchForUser(prefetch)}";
-            else if (hasTextAttach || hasImageAttach)
+            if (hasTextAttach || hasImageAttach || hasPathAttach)
                 offlineText = $"{offlineText}\n（在线模型暂时忙，附件我记下了。）";
             else if (wantDesktop)
                 offlineText = $"{offlineText}\n（在线模型暂时不可用，先本地陪你。）";
@@ -984,6 +1021,22 @@ public sealed class AiAgentService
             .Trim();
     }
 
+    /// <summary>
+    /// 预取成功但模型空回复时：把工具原文整理成陪伴口吻，避免再跳备用线路。
+    /// </summary>
+    private static string FormatPrefetchAsCompanionReply(string prefetch, string partnerName)
+    {
+        var body = FormatPrefetchForUser(prefetch);
+        // 去掉过长的技术噪音
+        if (body.Length > 1800)
+            body = body[..1800] + "…";
+        body = Regex.Replace(body, @"\*\*(.+?)\*\*", "$1");
+        body = Regex.Replace(body, @"#{1,6}\s*", "");
+        return
+            $"{partnerName}，我帮你查好啦～\n\n{body.Trim()}\n\n" +
+            "还有想问的直接说，小申在桌角陪你～";
+    }
+
     private static string ComposeUserMessage(string text, IReadOnlyList<ChatAttachment> attachments)
     {
         if (attachments.Count == 0)
@@ -1138,6 +1191,11 @@ public sealed class AiAgentService
     private static string CleanReply(string text)
     {
         var cleaned = StripToolMarkup((text ?? string.Empty).Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
+        // 聊天气泡不渲染 Markdown：去掉 **加粗** *斜体* 等，避免用户看到星号
+        cleaned = Regex.Replace(cleaned, @"\*\*(.+?)\*\*", "$1");
+        cleaned = Regex.Replace(cleaned, @"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", "$1");
+        cleaned = Regex.Replace(cleaned, @"__(.+?)__", "$1");
+        cleaned = Regex.Replace(cleaned, @"`([^`]+)`", "$1");
         if (cleaned.Length > AiConfig.MaxReplyChars)
             cleaned = cleaned[..AiConfig.MaxReplyChars] + "\n…（后面还有，再说一声我继续发）";
         return cleaned;

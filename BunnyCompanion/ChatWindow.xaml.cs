@@ -192,82 +192,7 @@ public partial class ChatWindow : Window
         AttachBar.Visibility = Visibility.Collapsed;
     }
 
-    // ---------- 拖拽文件到聊天窗口（Agent 附件） ----------
-
-    /// <summary>
-    /// 兼容 FileDrop / FileNameW / 单字符串路径；部分资源管理器只报 FileNameW。
-    /// </summary>
-    private static bool HasFileDrop(DragEventArgs e)
-    {
-        try
-        {
-            if (e.Data.GetDataPresent(DataFormats.FileDrop, autoConvert: true))
-                return true;
-            if (e.Data.GetDataPresent("FileDrop", autoConvert: true))
-                return true;
-            if (e.Data.GetDataPresent("FileNameW", autoConvert: true))
-                return true;
-            if (e.Data.GetDataPresent("FileName", autoConvert: true))
-                return true;
-        }
-        catch
-        {
-            // ignore
-        }
-
-        return false;
-    }
-
-    private static string[] ExtractDroppedPaths(DragEventArgs e)
-    {
-        var list = new List<string>();
-        try
-        {
-            if (e.Data.GetDataPresent(DataFormats.FileDrop, true))
-            {
-                switch (e.Data.GetData(DataFormats.FileDrop, true))
-                {
-                    case string[] arr:
-                        list.AddRange(arr);
-                        break;
-                    case string one when !string.IsNullOrWhiteSpace(one):
-                        list.Add(one);
-                        break;
-                }
-            }
-
-            // 部分 shell 只提供 FileNameW
-            if (list.Count == 0 && e.Data.GetDataPresent("FileNameW", true))
-            {
-                switch (e.Data.GetData("FileNameW", true))
-                {
-                    case string[] arr:
-                        list.AddRange(arr);
-                        break;
-                    case string one when !string.IsNullOrWhiteSpace(one):
-                        list.Add(one);
-                        break;
-                    case System.Collections.IEnumerable en:
-                        foreach (var o in en)
-                        {
-                            if (o is string s && !string.IsNullOrWhiteSpace(s))
-                                list.Add(s);
-                        }
-                        break;
-                }
-            }
-        }
-        catch
-        {
-            // ignore
-        }
-
-        return list
-            .Where(p => !string.IsNullOrWhiteSpace(p))
-            .Select(p => p.Trim().Trim('"'))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-    }
+    // ---------- 拖拽文件（资源管理器 + 微信虚拟文件/位图） ----------
 
     /// <summary>
     /// 文件夹：展开第一层文件（最多补到 6 个附件额度），不递归整树。
@@ -314,8 +239,8 @@ public partial class ChatWindow : Window
 
     private void Window_PreviewDragEnter(object sender, DragEventArgs e)
     {
-        // 必须 Handled=true，否则 TextBox 等子控件会盖掉 Effects，出现「禁止拖入」图标
-        if (!HasFileDrop(e) || _busy || _loadingAttachments)
+        // 微信拖图在 Enter 时常没有 FileDrop，须宽松识别，且 Handled=true 才能显示可放置
+        if (_busy || _loadingAttachments || !ChatDragDropService.LooksLikeFileOrImageDrag(e))
         {
             e.Effects = DragDropEffects.None;
             e.Handled = true;
@@ -329,7 +254,7 @@ public partial class ChatWindow : Window
 
     private void Window_PreviewDragOver(object sender, DragEventArgs e)
     {
-        if (!HasFileDrop(e) || _busy || _loadingAttachments)
+        if (_busy || _loadingAttachments || !ChatDragDropService.LooksLikeFileOrImageDrag(e))
         {
             e.Effects = DragDropEffects.None;
             e.Handled = true;
@@ -363,7 +288,7 @@ public partial class ChatWindow : Window
     {
         SetDropOverlay(false);
         e.Effects = DragDropEffects.Copy;
-        e.Handled = true; // 阻止 TextBox 把路径当文本粘贴
+        e.Handled = true; // 阻止 TextBox 把路径当文字粘贴
 
         if (_busy || _loadingAttachments)
         {
@@ -371,10 +296,26 @@ public partial class ChatWindow : Window
             return;
         }
 
-        var paths = ExtractDroppedPaths(e);
-        if (paths.Length == 0)
+        StatusText.Text = "正在接收拖入文件…";
+        IReadOnlyList<string> paths;
+        try
         {
-            AppendSystemTip("没有识别到可拖入的文件，请从资源管理器拖文件（不是快捷方式碎片）。");
+            // 微信 JPG：虚拟文件 / 位图 / 延迟临时路径
+            paths = await ChatDragDropService.ExtractPathsAsync(e).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            AppendSystemTip("拖入解析失败：" + ex.Message);
+            StatusText.Text = "在线";
+            return;
+        }
+
+        if (paths.Count == 0)
+        {
+            AppendSystemTip(
+                "没识别到文件。微信可试：①图片另存到桌面再拖 ②或点「＋」选择。" +
+                "（已兼容微信虚拟文件与预览位图）");
+            StatusText.Text = "在线";
             return;
         }
 
@@ -913,6 +854,10 @@ public partial class ChatWindow : Window
     {
         if (string.IsNullOrWhiteSpace(provider))
             return "在线";
+        if (provider.Contains("阶跃", StringComparison.Ordinal) || provider.Contains("预取", StringComparison.Ordinal))
+            return "在线";
+        if (provider.Contains("备用", StringComparison.Ordinal) || provider.Contains("OpenRouter", StringComparison.OrdinalIgnoreCase))
+            return "在线·备用";
         if (provider.Contains("本地", StringComparison.Ordinal))
             return "本地陪伴";
         if (provider.Contains("阶跃", StringComparison.Ordinal))

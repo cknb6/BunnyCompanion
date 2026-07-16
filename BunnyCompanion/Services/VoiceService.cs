@@ -112,60 +112,89 @@ public static class VoiceService
         SpeakSapi(text);
     }
 
-    /// <summary>阶跃在线 TTS：优先 /v1/audio/speech，再试 step_plan 路径；写临时 wav 播放。</summary>
+    /// <summary>
+    /// 阶跃在线 TTS：只用女声音色（御姐/甜美），绝不回退男声。
+    /// 模型优先 vivid，失败再 mini。
+    /// </summary>
     private static async Task<bool> TryStepTtsAsync(string text)
     {
         var bases = new[]
         {
             AiConfig.StepAudioBaseUrl.TrimEnd('/'),
-            AiConfig.StepBaseUrl.TrimEnd('/'),
+            // step_plan 下一般没有 speech，但保留兼容
         };
-        // 主音色失败时换一个官方音色再试
-        var voices = new[] { AiConfig.StepTtsVoice, "cixingnansheng", "zhengpaiqingshu" };
+        var models = new[]
+        {
+            AiConfig.StepTtsModel, // step-tts-vivid
+            "step-tts-mini",
+            "step-tts-2",
+        };
+        // 仅女声（过滤男声 id，桌宠是女生）
+        var voices = new List<string>();
+        void AddFemale(string? id)
+        {
+            if (string.IsNullOrWhiteSpace(id))
+                return;
+            if (id.Contains("nan", StringComparison.OrdinalIgnoreCase)
+                || id.Contains("male", StringComparison.OrdinalIgnoreCase)
+                || id.Contains("cixing", StringComparison.OrdinalIgnoreCase))
+                return;
+            if (!voices.Contains(id, StringComparer.OrdinalIgnoreCase))
+                voices.Add(id);
+        }
+
+        AddFemale(AiConfig.StepTtsVoice);
+        foreach (var v in AiConfig.StepTtsFemaleVoices)
+            AddFemale(v);
 
         foreach (var baseUrl in bases)
         {
-            foreach (var voice in voices)
+            foreach (var model in models)
             {
-                try
+                foreach (var voice in voices)
                 {
-                    var url = $"{baseUrl}/audio/speech";
-                    var payload = new JsonObject
-                    {
-                        ["model"] = AiConfig.StepTtsModel,
-                        ["input"] = text,
-                        ["voice"] = voice,
-                        ["response_format"] = "wav",
-                    };
-
-                    using var request = new HttpRequestMessage(HttpMethod.Post, url);
-                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", AiConfig.StepApiKey);
-                    request.Content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
-
-                    using var resp = await Http.SendAsync(request).ConfigureAwait(false);
-                    if (!resp.IsSuccessStatusCode)
-                        continue;
-                    var bytes = await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
-                    if (bytes.Length < 100)
-                        continue;
-
-                    var tmp = Path.Combine(Path.GetTempPath(), $"xiaoshen_tts_{Guid.NewGuid():N}.wav");
-                    await File.WriteAllBytesAsync(tmp, bytes).ConfigureAwait(false);
                     try
                     {
-                        using var player = new System.Media.SoundPlayer(tmp);
-                        player.PlaySync();
-                    }
-                    finally
-                    {
-                        try { File.Delete(tmp); } catch { /* ignore */ }
-                    }
+                        var url = $"{baseUrl}/audio/speech";
+                        var payload = new JsonObject
+                        {
+                            ["model"] = model,
+                            ["input"] = text,
+                            ["voice"] = voice,
+                            ["response_format"] = "wav",
+                            // 略快一点更活泼甜美；接口不认会忽略
+                            ["speed"] = AiConfig.StepTtsSpeed,
+                        };
 
-                    return true;
-                }
-                catch
-                {
-                    // 试下一组 base/voice
+                        using var request = new HttpRequestMessage(HttpMethod.Post, url);
+                        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", AiConfig.StepApiKey);
+                        request.Content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
+
+                        using var resp = await Http.SendAsync(request).ConfigureAwait(false);
+                        if (!resp.IsSuccessStatusCode)
+                            continue;
+                        var bytes = await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+                        if (bytes.Length < 100)
+                            continue;
+
+                        var tmp = Path.Combine(Path.GetTempPath(), $"xiaoshen_tts_{Guid.NewGuid():N}.wav");
+                        await File.WriteAllBytesAsync(tmp, bytes).ConfigureAwait(false);
+                        try
+                        {
+                            using var player = new System.Media.SoundPlayer(tmp);
+                            player.PlaySync();
+                        }
+                        finally
+                        {
+                            try { File.Delete(tmp); } catch { /* ignore */ }
+                        }
+
+                        return true;
+                    }
+                    catch
+                    {
+                        // 试下一组 model/voice
+                    }
                 }
             }
         }
@@ -175,7 +204,7 @@ public static class VoiceService
 
     private const uint SpeakFlagsIsXml = 0x8; // SPF_IS_XML
 
-    /// <summary>SAPI 离线朗读（同步，应在后台线程调用）；优先中文语音。</summary>
+    /// <summary>SAPI 离线朗读：强制优先中文女声，避免系统默认男声。</summary>
     private static void SpeakSapi(string text)
     {
         lock (_gate)
@@ -185,17 +214,33 @@ public static class VoiceService
                 return;
             try
             {
-                // 用 SSML 指定中文，提升中文发音质量（系统无中文语音时仍会回退）
                 var escaped = System.Security.SecurityElement.Escape(text) ?? text;
+                // Gender=Female + 中文：御姐/甜美感取决于本机是否安装中文女声包
                 var ssml =
-                    $"<?xml version=\"1.0\"?><speak version=\"1.0\" xml:lang=\"zh-CN\">{escaped}</speak>";
+                    "<?xml version=\"1.0\"?>" +
+                    "<speak version=\"1.0\" xml:lang=\"zh-CN\">" +
+                    "<voice required=\"Gender=Female;Language=804\">" +
+                    $"<prosody rate=\"+8%\">{escaped}</prosody>" +
+                    "</voice></speak>";
                 try
                 {
                     _voice.Speak(ssml, SpeakFlagsAsync | SpeakFlagsPurgeBeforeSpeak | SpeakFlagsIsXml, out _);
                 }
                 catch
                 {
-                    _voice.Speak(text, SpeakFlagsAsync | SpeakFlagsPurgeBeforeSpeak, out _);
+                    // 仅再试中文女声 SSML；失败则静音，绝不回落系统默认男声
+                    try
+                    {
+                        var ssml2 =
+                            "<?xml version=\"1.0\"?><speak version=\"1.0\" xml:lang=\"zh-CN\">" +
+                            "<voice required=\"Gender=Female\">" +
+                            $"<prosody rate=\"+5%\">{escaped}</prosody></voice></speak>";
+                        _voice.Speak(ssml2, SpeakFlagsAsync | SpeakFlagsPurgeBeforeSpeak | SpeakFlagsIsXml, out _);
+                    }
+                    catch
+                    {
+                        // 无女声包时宁可不出声，也不播男声
+                    }
                 }
             }
             catch { /* ignore */ }
