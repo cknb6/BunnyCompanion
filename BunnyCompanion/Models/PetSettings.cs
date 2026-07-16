@@ -37,6 +37,18 @@ public sealed class PetSettings
     /// <summary>系统监控触发器配置（CPU/内存/电池/久坐提醒阈值）。</summary>
     public SystemTriggerConfig SystemTriggers { get; set; } = new();
 
+    /// <summary>
+    /// Agent 工作模式：companion=陪伴（默认）/ office=办公Agent（多步工具·计划执行）。
+    /// 序列化为字符串，兼容旧配置。
+    /// </summary>
+    public string AgentMode { get; set; } = "companion";
+
+    /// <summary>是否为办公 Agent 模式。</summary>
+    public bool IsOfficeMode =>
+        string.Equals(AgentMode, "office", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(AgentMode, "办公", StringComparison.Ordinal)
+        || string.Equals(AgentMode, "agent", StringComparison.OrdinalIgnoreCase);
+
     public static List<string> DefaultMessages() =>
     [
         "{name}，今天也要好好照顾自己呀",
@@ -77,6 +89,9 @@ public sealed class PetSettings
             FirstMetDate = DateTime.Today;
         SystemTriggers ??= new SystemTriggerConfig();
         SystemTriggers.Normalize();
+        // 模式归一：仅 companion / office
+        var mode = (AgentMode ?? "").Trim().ToLowerInvariant();
+        AgentMode = mode is "office" or "办公" or "agent" or "work" ? "office" : "companion";
     }
 
     private static string NormalizeTimeText(string? value, string fallback) =>

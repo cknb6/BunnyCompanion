@@ -193,23 +193,61 @@ public sealed class AiAgentService
                 // 记忆失败不阻断对话
             }
 
-            var systemPrompt = AgentSystemPrompt.Build(settings);
+            var officeMode = settings.IsOfficeMode;
+            var systemPrompt = officeMode
+                ? AgentSystemPrompt.BuildOffice(settings)
+                : AgentSystemPrompt.Build(settings);
             var memoryBlock = _memory.FormatForSystemPrompt();
             if (!string.IsNullOrWhiteSpace(memoryBlock))
                 systemPrompt += "\n\n" + memoryBlock;
             // 本地 agent.md：滚动摘要 + 近期压缩对话（长期记忆主载体之一）
             try
             {
-                var agentMdBlock = _agentMd.FormatForSystemPrompt(maxChars: 5500);
+                var agentMdBlock = _agentMd.FormatForSystemPrompt(maxChars: officeMode ? 4000 : 5500);
                 if (!string.IsNullOrWhiteSpace(agentMdBlock) && agentMdBlock.Length > 80)
                     systemPrompt += "\n\n" + agentMdBlock;
             }
             catch { /* ignore */ }
 
-            var toolTrace = new List<string>();
+            // 办公：注入进行中计划 + 技能触发词自动匹配
+            if (officeMode)
+            {
+                try
+                {
+                    var planBlock = CompanionRuntime.OfficePlan.FormatForSystemPrompt();
+                    if (!string.IsNullOrWhiteSpace(planBlock))
+                        systemPrompt += "\n\n" + planBlock;
+                }
+                catch { /* ignore */ }
 
-            // 本地意图预取：定位/天气等；有预取时优先「无 tools 阶跃」总结，避免空 content+再掉备用线路
-            var prefetch = await MaybePrefetchLocalFactsAsync(text, progress, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    var skill = CompanionRuntime.Skills.Match(text);
+                    if (skill is not null)
+                    {
+                        var body = CompanionRuntime.Skills.GetBody(skill.Name);
+                        systemPrompt += "\n\n# 已匹配本地技能（优先 skill_get / skill_run）\n";
+                        systemPrompt += $"技能名: {skill.Name}\n";
+                        if (!string.IsNullOrWhiteSpace(skill.Description))
+                            systemPrompt += $"说明: {skill.Description}\n";
+                        if (!string.IsNullOrWhiteSpace(body))
+                        {
+                            var clip = body.Length > 2500 ? body[..2500] + "\n…" : body;
+                            systemPrompt += "技能正文:\n" + clip;
+                        }
+                    }
+                }
+                catch { /* ignore */ }
+            }
+
+            var toolTrace = new List<string>();
+            if (officeMode)
+                toolTrace.Add("mode:office");
+
+            // 本地意图预取：定位/天气等（办公模式下对纯天气仍可用；复杂任务不预取截断 tools）
+            var prefetch = officeMode && LooksLikeHeavyOfficeTask(text)
+                ? null
+                : await MaybePrefetchLocalFactsAsync(text, progress, cancellationToken).ConfigureAwait(false);
             var hasPrefetch = !string.IsNullOrWhiteSpace(prefetch);
             if (hasPrefetch)
             {
@@ -219,7 +257,7 @@ public sealed class AiAgentService
             }
 
             // 1a) 已有预取：阶跃纯文本总结（无 tools）—— 天气/定位芯片的主路径
-            if (hasPrefetch)
+            if (hasPrefetch && !officeMode)
             {
                 progress?.Report("在线整理中…");
                 var stepPrefetch = await TryAgentLoopAsync(
@@ -233,6 +271,7 @@ public sealed class AiAgentService
                     images: Array.Empty<ImageInput>(),
                     maxTokens: AiConfig.StepDefaultMaxTokens,
                     enableTools: false,
+                    officeMode: false,
                     progress: progress,
                     toolTrace: toolTrace,
                     extra: node => node["reasoning_effort"] = AiConfig.StepEffort,
@@ -255,10 +294,13 @@ public sealed class AiAgentService
                     "阶跃·预取", toolTrace, pendingUserTurn, userText: text);
             }
 
-            // 1b) 无预取：阶跃 + tools（文件/命令/通用 Agent）
-            progress?.Report("在线思考中…");
+            // 1b) 阶跃 + tools（陪伴 / 办公 Agent）
+            progress?.Report(officeMode ? "办公 Agent 规划执行中…" : "在线思考中…");
+            var stepMaxTokens = officeMode ? AiConfig.StepOfficeMaxTokens : AiConfig.StepDefaultMaxTokens;
+            var stepTimeout = officeMode ? AiConfig.StepOfficeTimeoutSeconds : AiConfig.StepRequestTimeoutSeconds;
+            var stepEffort = officeMode ? AiConfig.StepOfficeEffort : AiConfig.StepEffort;
             var step = await TryAgentLoopAsync(
-                providerLabel: "阶跃·3.7",
+                providerLabel: officeMode ? "阶跃·办公" : "阶跃·3.7",
                 baseUrl: AiConfig.StepBaseUrl,
                 apiKey: AiConfig.StepApiKey,
                 model: AiConfig.StepModel,
@@ -266,12 +308,13 @@ public sealed class AiAgentService
                 systemPrompt: systemPrompt,
                 history: historySnapshot,
                 images: images,
-                maxTokens: AiConfig.StepDefaultMaxTokens,
+                maxTokens: stepMaxTokens,
                 enableTools: true,
+                officeMode: officeMode,
                 progress: progress,
                 toolTrace: toolTrace,
-                extra: node => node["reasoning_effort"] = AiConfig.StepEffort,
-                requestTimeoutSeconds: AiConfig.StepRequestTimeoutSeconds,
+                extra: node => node["reasoning_effort"] = stepEffort,
+                requestTimeoutSeconds: stepTimeout,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             if (step is { } s)
             {
@@ -279,6 +322,21 @@ public sealed class AiAgentService
                 return Finalize((s.Text, InferAction(s.Text)), settings,
                     usedVisual: images.Count > 0, usedDesktop: desktopCaptured,
                     s.Provider, toolTrace, pendingUserTurn, userText: text);
+            }
+
+            // 办公模式：阶跃 tools 失败时不假装无工具干活，直接带痕迹诚实失败
+            if (officeMode)
+            {
+                var officeFail =
+                    "办公 Agent 这轮没跑通在线工具链（超时或接口异常）。\n" +
+                    "请再试一次，或把任务拆小一点（例如先 list_dir 再 read_file）。\n" +
+                    (toolTrace.Count > 0
+                        ? "已记录步骤: " + string.Join(" → ", toolTrace.Distinct().Take(12))
+                        : "尚未成功调用本机工具。");
+                cancellationToken.ThrowIfCancellationRequested();
+                return Finalize((officeFail, "sad"), settings,
+                    usedVisual: false, usedDesktop: desktopCaptured,
+                    "办公·中断", toolTrace, pendingUserTurn, userText: text);
             }
 
             // 2) 阶跃纯文本再试（无 tools）；进度文案不暴露供应商名
@@ -294,6 +352,7 @@ public sealed class AiAgentService
                 images: images.Count > 0 ? images : Array.Empty<ImageInput>(),
                 maxTokens: AiConfig.StepDefaultMaxTokens,
                 enableTools: false,
+                officeMode: false,
                 progress: progress,
                 toolTrace: toolTrace,
                 extra: node => node["reasoning_effort"] = AiConfig.StepEffort,
@@ -324,6 +383,7 @@ public sealed class AiAgentService
                     images: images,
                     maxTokens: AiConfig.FallbackMaxTokens,
                     enableTools: false,
+                    officeMode: false,
                     progress: progress,
                     toolTrace: toolTrace,
                     extra: null,
@@ -379,6 +439,7 @@ public sealed class AiAgentService
         IReadOnlyList<ImageInput> images,
         int maxTokens,
         bool enableTools,
+        bool officeMode,
         IProgress<string>? progress,
         List<string> toolTrace,
         Action<JsonObject>? extra,
@@ -389,21 +450,25 @@ public sealed class AiAgentService
         {
             // 阶跃：max_tokens 太小会被 reasoning 吃光，content 变空 → 误判失败 → 整条备用链拖死
             if (!openRouter)
-                maxTokens = Math.Max(maxTokens, AiConfig.StepMinMaxTokens);
+            {
+                var minTok = officeMode ? AiConfig.StepOfficeMinMaxTokens : AiConfig.StepMinMaxTokens;
+                maxTokens = Math.Max(maxTokens, minTok);
+            }
 
             var messages = BuildInitialMessages(systemPrompt, history, images);
             var tools = enableTools ? WindowsAgentToolkit.BuildToolDefinitions() : null;
             var emptyContentRetries = 0;
             var emptyAfterToolsRetries = 0;
             List<string>? lastToolResults = null;
+            var maxRounds = officeMode ? AiConfig.MaxToolRoundsOffice : AiConfig.MaxToolRounds;
 
-            for (var round = 0; round < AiConfig.MaxToolRounds; round++)
+            for (var round = 0; round < maxRounds; round++)
             {
                 var payload = new JsonObject
                 {
                     ["model"] = model,
                     ["messages"] = messages,
-                    ["temperature"] = 0.7,
+                    ["temperature"] = officeMode ? 0.45 : 0.7,
                     ["max_tokens"] = maxTokens,
                 };
                 if (tools is not null)
@@ -418,7 +483,8 @@ public sealed class AiAgentService
                 extra?.Invoke(payload);
 
                 using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                timeoutCts.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(requestTimeoutSeconds, 8, 90)));
+                var cap = officeMode ? 120 : 90;
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(requestTimeoutSeconds, 8, cap)));
 
                 string json;
                 try
@@ -484,14 +550,17 @@ public sealed class AiAgentService
                         return new LoopHit(string.Join("\n\n", toolResults), providerLabel);
                     }
 
-                    // 官方 tool_calls 或伪调用后都加一句约束，强制中文总结、禁止再吐标签
+                    // 工具后约束：办公模式可继续多步；陪伴模式倾向收口总结
                     messages.Add(new JsonObject
                     {
                         ["role"] = "user",
-                        ["content"] =
-                            "工具结果已全部给你。请用温柔简体中文直接回答用户：" +
-                            "总结要点、说明已做了什么；禁止输出 <tool_call>、<function>、XML 或 JSON 伪代码；" +
-                            "不要重复工具原始日志，改成口语。",
+                        ["content"] = officeMode
+                            ? "工具结果已回灌。若计划仍有未完成步骤或任务未落地：继续调用工具（plan_tick / 文件 / 命令等）。" +
+                              "仅当任务真正完成或无法继续时，才用简体中文做最终交付：" +
+                              "做了什么、关键路径、未完成项。禁止 <tool_call>/XML/JSON 伪代码；不要复述原始日志。"
+                            : "工具结果已全部给你。请用温柔简体中文直接回答用户：" +
+                              "总结要点、说明已做了什么；禁止输出 <tool_call>、<function>、XML 或 JSON 伪代码；" +
+                              "不要重复工具原始日志，改成口语。",
                     });
 
                     continue;
@@ -553,7 +622,11 @@ public sealed class AiAgentService
             if (lastToolResults is { Count: > 0 })
                 return new LoopHit(FormatToolResultsFallback(lastToolResults), providerLabel);
 
-            return new LoopHit("工具步骤有点多，我先停一下～你再说具体一点目标，我继续帮你弄。", providerLabel);
+            return new LoopHit(
+                officeMode
+                    ? $"已达本回合工具步数上限（{maxRounds}）。请根据已有结果继续下达更具体的下一步，或缩小任务范围。"
+                    : "工具步骤有点多，我先停一下～你再说具体一点目标，我继续帮你弄。",
+                providerLabel);
         }
         catch (OperationCanceledException)
         {
@@ -884,7 +957,8 @@ public sealed class AiAgentService
 
     private static bool IsDeterministicLocalTool(string name) =>
         name is "zodiac_analyze" or "daily_card" or "get_system_info" or "get_system_monitor"
-            or "memory_list" or "memo_list" or "agent_md_path" or "get_special_folder";
+            or "memory_list" or "memo_list" or "agent_md_path" or "get_special_folder"
+            or "plan_status" or "plan_set" or "plan_tick";
 
     private static bool LooksLikeOnlyToolMarkup(string? content)
     {
@@ -1190,6 +1264,21 @@ public sealed class AiAgentService
             "desktop screenshot", "look at my screen", "screenshot",
         ];
         return keys.Any(key => text.Contains(key, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>办公重任务：跳过天气/定位预取，避免关掉 tools 主路径。</summary>
+    private static bool LooksLikeHeavyOfficeTask(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+        string[] keys =
+        [
+            "整理", "批量", "移动", "重命名", "删除", "复制", "写入", "创建", "搜索文件", "列出",
+            "写代码", "改代码", "写文件", "读文件", "执行命令", "powershell", "脚本",
+            "总结网页", "抓网页", "搜索一下", "帮我处理", "办公", "计划", "todo",
+            "batch", "rename", "move all", "organize",
+        ];
+        return keys.Any(k => text.Contains(k, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string InferAction(string text)

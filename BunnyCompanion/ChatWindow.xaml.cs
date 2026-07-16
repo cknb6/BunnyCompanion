@@ -80,12 +80,52 @@ public partial class ChatWindow : Window
     {
         FitToScreen();
         RefreshSoundToggleUi();
+        RefreshModeToggleUi();
         AppendTimeIfNeeded(force: true);
+        var modeHint = _settings.IsOfficeMode
+            ? "当前是【办公 Agent】：多步工具·计划执行（右上角 🛠 可切回陪伴）。"
+            : "当前是【陪伴模式】。右上角 💬 可切到【办公 Agent】（多步工具，像 CLI Agent）。";
         AppendBubble(
             _settings.PetName,
-            $"嗨，{_settings.PartnerName}～\n像微信一样随便聊就行。\n• 把文件拖进这个窗口（图片/代码/任意路径）\n• 点「＋」选择，或 Ctrl+V 粘贴截图\n• 点「看桌面」让我瞅屏幕\n断网也没关系，我会继续陪你。",
+            $"嗨，{_settings.PartnerName}～\n{modeHint}\n• 把文件拖进这个窗口（图片/代码/任意路径）\n• 点「＋」选择，或 Ctrl+V 粘贴截图\n• 点「看桌面」让我瞅屏幕\n断网也没关系，我会继续陪你。",
             isPet: true);
         InputBox.Focus();
+    }
+
+    private void ModeToggleButton_Click(object sender, RoutedEventArgs e)
+    {
+        _settings.AgentMode = _settings.IsOfficeMode ? "companion" : "office";
+        _settings.Normalize();
+        try
+        {
+            new SettingsService().Save(_settings);
+        }
+        catch { /* ignore */ }
+
+        RefreshModeToggleUi();
+        var msg = _settings.IsOfficeMode
+            ? "已切换到【办公 Agent】模式。\n复杂任务我会先 plan_set，再多步调用本机工具；批量操作默认先预览。\n说「整理桌面 PDF / 写文件 / 搜网页摘要」试试看～"
+            : "已切回【陪伴模式】。撒娇闲聊、天气关心更轻快；需要干活再点 🛠。";
+        AppendSystemTip(msg);
+        StatusText.Text = _settings.IsOfficeMode ? "办公 Agent" : "在线";
+    }
+
+    private void RefreshModeToggleUi()
+    {
+        if (ModeToggleButton is null)
+            return;
+        if (_settings.IsOfficeMode)
+        {
+            ModeToggleButton.Content = "🛠";
+            ModeToggleButton.ToolTip = "当前：办公 Agent。点击切回陪伴模式";
+            TitleText.Text = _settings.PetName + " · 办公";
+        }
+        else
+        {
+            ModeToggleButton.Content = "💬";
+            ModeToggleButton.ToolTip = "当前：陪伴模式。点击切换到办公 Agent";
+            TitleText.Text = _settings.PetName;
+        }
     }
 
     /// <summary>
@@ -786,8 +826,12 @@ public partial class ChatWindow : Window
         var requestCts = new CancellationTokenSource();
         _cts = requestCts;
         _cancelRequested = false;
-        SetBusy(true, includeDesktop ? "正在看你的桌面…" : hasAttach ? "正在看你发的文件…" : "在线思考中…");
-        var finalStatus = "在线";
+        SetBusy(true,
+            includeDesktop ? "正在看你的桌面…"
+            : hasAttach ? "正在看你发的文件…"
+            : _settings.IsOfficeMode ? "办公 Agent 执行中…"
+            : "在线思考中…");
+        var finalStatus = _settings.IsOfficeMode ? "办公 Agent" : "在线";
 
         // UI 线程进度：工具执行状态显示在状态栏
         var progress = new Progress<string>(msg =>
@@ -916,16 +960,14 @@ public partial class ChatWindow : Window
     {
         if (string.IsNullOrWhiteSpace(provider))
             return "在线";
+        if (provider.Contains("办公", StringComparison.Ordinal))
+            return "办公 Agent";
         if (provider.Contains("阶跃", StringComparison.Ordinal) || provider.Contains("预取", StringComparison.Ordinal))
             return "在线";
         if (provider.Contains("备用", StringComparison.Ordinal) || provider.Contains("OpenRouter", StringComparison.OrdinalIgnoreCase))
             return "在线·备用";
         if (provider.Contains("本地", StringComparison.Ordinal))
             return "本地陪伴";
-        if (provider.Contains("阶跃", StringComparison.Ordinal))
-            return "在线";
-        if (provider.Contains("OpenRouter", StringComparison.OrdinalIgnoreCase))
-            return "在线";
         return "在线";
     }
 

@@ -8,6 +8,7 @@ public static class CompanionRuntime
     private static CompanionMemoryService? _memory;
     private static LocalAgentMdStore? _agentMd;
     private static SkillPluginService? _skills;
+    private static OfficePlanStore? _officePlan;
 
     public static CompanionMemoryService Memory
     {
@@ -25,6 +26,13 @@ public static class CompanionRuntime
     {
         get => _skills ??= new SkillPluginService();
         set => _skills = value;
+    }
+
+    /// <summary>办公模式会话计划（plan_set / plan_tick）。</summary>
+    public static OfficePlanStore OfficePlan
+    {
+        get => _officePlan ??= new OfficePlanStore();
+        set => _officePlan = value;
     }
 
     /// <summary>结构化记忆落盘后同步刷新 agent.md 固定区。</summary>

@@ -168,6 +168,139 @@ public static class BrowserService
         }
     }
 
+    /// <summary>
+    /// 抓取搜索结果摘要（标题+链接），供办公 Agent 直接阅读，不必只打开浏览器。
+    /// 结构可能随站点变化；失败时返回错误并建议 web_search 打开页。
+    /// </summary>
+    public static async Task<string> SearchResultsAsync(string query, string engine, int max, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+            return "错误：搜索词为空";
+        max = Math.Clamp(max, 1, 10);
+        engine = string.IsNullOrWhiteSpace(engine) ? "bing" : engine.Trim().ToLowerInvariant();
+        var q = Uri.EscapeDataString(query.Trim());
+        var url = engine switch
+        {
+            "baidu" => $"https://www.baidu.com/s?wd={q}",
+            "google" => $"https://www.google.com/search?q={q}&hl=zh-CN",
+            _ => $"https://www.bing.com/search?q={q}&setlang=zh-CN",
+        };
+
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.TryAddWithoutValidation("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.5");
+            using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
+            var html = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+                return $"搜索页 HTTP {(int)resp.StatusCode}。可改用 web_search 打开浏览器。\nURL: {url}";
+
+            var items = engine == "baidu"
+                ? ParseBaiduResults(html, max)
+                : ParseBingResults(html, max);
+
+            if (items.Count == 0)
+            {
+                return $"未能解析「{query}」的搜索结果（页面结构可能变化）。\n" +
+                       $"搜索页: {url}\n建议：web_search 打开浏览器，或 fetch_url 抓已知网址。";
+            }
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"【搜索摘要】{query}（{engine}，最多 {max} 条）");
+            sb.AppendLine($"来源页: {url}");
+            var n = 1;
+            foreach (var (title, link, snip) in items)
+            {
+                sb.AppendLine($"{n}. {title}");
+                sb.AppendLine($"   {link}");
+                if (!string.IsNullOrWhiteSpace(snip))
+                    sb.AppendLine($"   {snip}");
+                n++;
+            }
+
+            sb.AppendLine("说明: 摘要供决策；需要正文请再 fetch_url。");
+            return sb.ToString().Trim();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return $"搜索摘要失败: {ex.Message}\n可改用 web_search 打开浏览器。";
+        }
+    }
+
+    private static List<(string Title, string Link, string Snip)> ParseBingResults(string html, int max)
+    {
+        var list = new List<(string, string, string)>();
+        // Bing: <li class="b_algo"> ... <h2><a href="...">title</a>
+        var blocks = Regex.Matches(html, @"(?is)<li[^>]*class=""b_algo""[^>]*>(.*?)</li>");
+        foreach (Match block in blocks)
+        {
+            if (list.Count >= max)
+                break;
+            var chunk = block.Groups[1].Value;
+            var a = Regex.Match(chunk, @"(?is)<h2[^>]*>\s*<a[^>]+href=""(https?://[^""]+)""[^>]*>(.*?)</a>");
+            if (!a.Success)
+                a = Regex.Match(chunk, @"(?is)<a[^>]+href=""(https?://[^""]+)""[^>]*>(.*?)</a>");
+            if (!a.Success)
+                continue;
+            var link = a.Groups[1].Value.Trim();
+            if (link.Contains("microsoft.com/privacy", StringComparison.OrdinalIgnoreCase)
+                || link.Contains("bing.com/ck/", StringComparison.OrdinalIgnoreCase) && list.Count > 0)
+            {
+                // 仍接受 bing 跳转链
+            }
+
+            var title = HtmlToText(a.Groups[2].Value);
+            if (string.IsNullOrWhiteSpace(title) || title.Length < 2)
+                continue;
+            var snipM = Regex.Match(chunk, @"(?is)<p[^>]*>(.*?)</p>");
+            var snip = snipM.Success ? HtmlToText(snipM.Groups[1].Value) : "";
+            if (snip.Length > 160)
+                snip = snip[..160] + "…";
+            list.Add((title, link, snip));
+        }
+
+        // 兜底：任意外链
+        if (list.Count == 0)
+        {
+            foreach (Match m in Regex.Matches(html, @"(?is)<a[^>]+href=""(https?://(?!www\.bing\.com|bing\.com|login\.live)[^""]+)""[^>]*>(.*?)</a>"))
+            {
+                if (list.Count >= max)
+                    break;
+                var title = HtmlToText(m.Groups[2].Value);
+                var link = m.Groups[1].Value;
+                if (string.IsNullOrWhiteSpace(title) || title.Length < 4)
+                    continue;
+                if (list.Any(x => x.Item2 == link))
+                    continue;
+                list.Add((title, link, ""));
+            }
+        }
+
+        return list;
+    }
+
+    private static List<(string Title, string Link, string Snip)> ParseBaiduResults(string html, int max)
+    {
+        var list = new List<(string, string, string)>();
+        foreach (Match m in Regex.Matches(html,
+                     @"(?is)<h3[^>]*>\s*<a[^>]+href=""(https?://[^""]+)""[^>]*>(.*?)</a>\s*</h3>"))
+        {
+            if (list.Count >= max)
+                break;
+            var title = HtmlToText(m.Groups[2].Value);
+            var link = m.Groups[1].Value;
+            if (string.IsNullOrWhiteSpace(title))
+                continue;
+            list.Add((title, link, ""));
+        }
+
+        return list;
+    }
+
     /// <summary>用默认浏览器打开指定 URL。</summary>
     public static string OpenUrl(string url)
     {

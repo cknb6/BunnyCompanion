@@ -412,5 +412,88 @@ void Fail(string msg)
         "\nrain=" + string.Join("|", rain) + "\ncares=" + string.Join("|", cares) + "\n");
 }
 
+// ---------- 5) 办公计划 OfficePlanStore + AgentMode ----------
+{
+    var planPath = Path.Combine(scratch, "office_plan_test.json");
+    var store = new OfficePlanStore(planPath);
+    var set = store.SetPlan("整理PDF", "搜索桌面pdf\n预览移动\n执行移动\n回报路径");
+    if (!set.Contains("办公计划", StringComparison.Ordinal)) Fail("plan_set 应输出计划标题");
+    else Ok("plan_set OK");
+
+    var steps = OfficePlanStore.ParseSteps("1. a\n2. b\n| c");
+    if (steps.Count != 3) Fail("ParseSteps 应解析 3 步，实际=" + steps.Count);
+    else Ok("ParseSteps count=3");
+
+    var jsonSteps = OfficePlanStore.ParseSteps("""["读文件","改文件","保存"]""");
+    if (jsonSteps.Count != 3) Fail("JSON 步骤解析失败");
+    else Ok("ParseSteps JSON OK");
+
+    store.Tick(1, "done", "found 3");
+    store.Tick(2, "skip", null);
+    var st = store.StatusText();
+    if (!st.Contains("[x]", StringComparison.Ordinal) || !st.Contains("[-]", StringComparison.Ordinal))
+        Fail("plan_tick 状态标记缺失");
+    else Ok("plan_tick 状态 OK");
+
+    // 落盘再读
+    var store2 = new OfficePlanStore(planPath);
+    if (!store2.HasPlan) Fail("计划应持久化");
+    else Ok("office_plan 持久化 OK");
+
+    var settings = new PetSettings { AgentMode = "office" };
+    settings.Normalize();
+    if (!settings.IsOfficeMode) Fail("AgentMode=office 应识别为办公");
+    settings.AgentMode = "companion";
+    settings.Normalize();
+    if (settings.IsOfficeMode) Fail("companion 不应为办公");
+    else Ok("PetSettings.AgentMode 归一 OK");
+
+    // 源码结构：办公轮数配置应存在于 AiConfig（静态检查）
+    var aiConfigPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
+        "BunnyCompanion", "Services", "AiConfig.cs"));
+    // GoalVerify 输出在 tools/GoalVerify/bin/Release/net8.0/ → 上溯到仓库根
+    var repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+    if (!Directory.Exists(Path.Combine(repoRoot, "BunnyCompanion")))
+        repoRoot = Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "..", ".."));
+    if (!Directory.Exists(Path.Combine(repoRoot, "BunnyCompanion")))
+        repoRoot = Directory.GetCurrentDirectory();
+    aiConfigPath = Path.Combine(repoRoot, "BunnyCompanion", "Services", "AiConfig.cs");
+    if (!File.Exists(aiConfigPath))
+        Fail("找不到 AiConfig.cs: " + aiConfigPath);
+    else
+    {
+        var cfg = File.ReadAllText(aiConfigPath);
+        if (!cfg.Contains("MaxToolRoundsOffice", StringComparison.Ordinal))
+            Fail("AiConfig 应定义 MaxToolRoundsOffice");
+        if (!cfg.Contains("StepOfficeMaxTokens", StringComparison.Ordinal))
+            Fail("AiConfig 应定义 StepOfficeMaxTokens");
+        else
+            Ok("AiConfig 办公预算常量存在");
+    }
+
+    // 工具定义源码应含 plan_set / batch_move / web_search_results
+    var toolkitPath = Path.Combine(repoRoot, "BunnyCompanion", "Services", "WindowsAgentToolkit.cs");
+    if (!File.Exists(toolkitPath))
+        Fail("找不到 WindowsAgentToolkit.cs");
+    else
+    {
+        var tk = File.ReadAllText(toolkitPath);
+        foreach (var name in new[] { "plan_set", "plan_tick", "batch_move", "batch_rename", "web_search_results" })
+        {
+            if (!tk.Contains("\"" + name + "\"", StringComparison.Ordinal))
+                Fail("工具箱缺少 " + name);
+        }
+        Ok("办公工具定义 plan/batch/web_search_results 存在");
+    }
+
+    var promptPath = Path.Combine(repoRoot, "BunnyCompanion", "Services", "AgentSystemPrompt.cs");
+    if (!File.Exists(promptPath) || !File.ReadAllText(promptPath).Contains("BuildOffice", StringComparison.Ordinal))
+        Fail("AgentSystemPrompt 应有 BuildOffice");
+    else
+        Ok("AgentSystemPrompt.BuildOffice 存在");
+
+    File.WriteAllText(Path.Combine(scratch, "office_plan.txt"), st + "\n---\n" + set + "\n");
+}
+
 Console.WriteLine(fails == 0 ? "ALL_PASS" : $"FAILURES={fails}");
 Environment.Exit(fails == 0 ? 0 : 1);

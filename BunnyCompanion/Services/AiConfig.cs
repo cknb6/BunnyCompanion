@@ -67,7 +67,16 @@ internal static class AiConfig
     public const int MaxImageAttachments = 4;
     /// <summary>单张图片压缩后软上限（字节），过大则再压 JPEG 质量。</summary>
     public const int MaxImageBytesSoft = 1_200_000;
-    /// <summary>工具往返轮数（过大只会拖慢）。</summary>
+    /// <summary>陪伴模式工具往返轮数。</summary>
     public const int MaxToolRounds = 6;
+    /// <summary>办公 Agent 模式工具往返轮数（多步计划需要更长预算）。</summary>
+    public const int MaxToolRoundsOffice = 14;
     public const int MaxToolResultChars = 12000;
+
+    // ---------- 办公模式阶跃预算（对齐 Claude Code 式多步执行） ----------
+    public const int StepOfficeMaxTokens = 2800;
+    public const int StepOfficeMinMaxTokens = 1200;
+    public const int StepOfficeTimeoutSeconds = 60;
+    /// <summary>办公模式推理强度：medium，兼顾工具规划与速度。</summary>
+    public const string StepOfficeEffort = "medium";
 }

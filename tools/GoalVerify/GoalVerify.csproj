@@ -21,5 +21,6 @@
     <Compile Include="..\..\BunnyCompanion\Services\AppUpdateService.cs" Link="AppUpdateService.cs" />
     <Compile Include="..\..\BunnyCompanion\Models\PetSettings.cs" Link="PetSettings.cs" />
     <Compile Include="..\..\BunnyCompanion\Services\SystemTriggerConfig.cs" Link="SystemTriggerConfig.cs" />
+    <Compile Include="..\..\BunnyCompanion\Services\OfficePlanStore.cs" Link="OfficePlanStore.cs" />
   </ItemGroup>
 </Project>

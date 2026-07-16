@@ -234,6 +234,56 @@ public static class WindowsAgentToolkit
         Tool("stop_speak",
             "停止当前语音朗读。",
             new JsonObject()),
+        // ---------- 办公 Agent：计划 / 批量 / 搜索摘要 ----------
+        Tool("plan_set",
+            "【办公】建立或重置多步计划（类似 Claude Code todo）。复杂任务必须先调用。steps 可用换行/| /JSON数组。",
+            Props(
+                ("title", "string", "计划标题，如 整理桌面PDF"),
+                ("steps", "string", "步骤列表，3～12 条，换行或 JSON 数组")),
+            required: ["steps"]),
+        Tool("plan_tick",
+            "【办公】勾选计划某一步。index 从 1 开始；status=done|failed|skip|pending。",
+            Props(
+                ("index", "integer", "步骤序号，从 1 开始"),
+                ("status", "string", "done/failed/skip/pending，默认 done"),
+                ("note", "string", "可选备注")),
+            required: ["index"]),
+        Tool("plan_status",
+            "【办公】查看当前计划进度与勾选状态。",
+            new JsonObject()),
+        Tool("batch_search",
+            "【办公】在目录中按通配符批量列出匹配文件（表格化结果）。",
+            Props(
+                ("root", "string", "根目录，可用 桌面/文档/下载"),
+                ("pattern", "string", "通配，如 *.pdf 或 *报告*"),
+                ("max_results", "integer", "最多条数，默认 80")),
+            required: ["root", "pattern"]),
+        Tool("batch_move",
+            "【办公】批量移动匹配文件到目标目录。默认 dry_run=true 只预览；确认后 dry_run=false 执行。",
+            Props(
+                ("root", "string", "搜索根目录"),
+                ("pattern", "string", "通配符"),
+                ("destination", "string", "目标目录"),
+                ("dry_run", "boolean", "true=只列清单不移动，默认 true"),
+                ("max_files", "integer", "最多处理数，默认 50")),
+            required: ["root", "pattern", "destination"]),
+        Tool("batch_rename",
+            "【办公】批量重命名：文件名中 replace_from → replace_to。默认 dry_run=true。",
+            Props(
+                ("root", "string", "根目录"),
+                ("pattern", "string", "通配，如 *.txt"),
+                ("replace_from", "string", "文件名中要替换的子串"),
+                ("replace_to", "string", "替换为"),
+                ("dry_run", "boolean", "true=预览，默认 true"),
+                ("max_files", "integer", "最多处理数，默认 50")),
+            required: ["root", "pattern", "replace_from"]),
+        Tool("web_search_results",
+            "【办公】抓取搜索引擎结果摘要（标题+链接+摘要），不打开浏览器。比 web_search 更适合 Agent 阅读。",
+            Props(
+                ("query", "string", "搜索词"),
+                ("engine", "string", "bing(默认)/baidu/google"),
+                ("max", "integer", "条数 1～10，默认 5")),
+            required: ["query"]),
     ];
 
     public static async Task<string> ExecuteAsync(string name, JsonObject? args, CancellationToken ct)
@@ -288,6 +338,25 @@ public static class WindowsAgentToolkit
                 "notify_user" => "OK: " + Str(args, "message"),
                 "speak_text" => SpeakTextTool(Str(args, "text")),
                 "stop_speak" => StopSpeakTool(),
+                "plan_set" => CompanionRuntime.OfficePlan.SetPlan(Str(args, "title"), Str(args, "steps")),
+                "plan_tick" => CompanionRuntime.OfficePlan.Tick(
+                    Int(args, "index", 0),
+                    string.IsNullOrWhiteSpace(Str(args, "status")) ? "done" : Str(args, "status"),
+                    Str(args, "note")),
+                "plan_status" => CompanionRuntime.OfficePlan.StatusText(),
+                "batch_search" => BatchSearch(Str(args, "root"), Str(args, "pattern"), Int(args, "max_results", 80)),
+                "batch_move" => BatchMove(
+                    Str(args, "root"), Str(args, "pattern"), Str(args, "destination"),
+                    Bool(args, "dry_run", true), Int(args, "max_files", 50)),
+                "batch_rename" => BatchRename(
+                    Str(args, "root"), Str(args, "pattern"),
+                    Str(args, "replace_from"), Str(args, "replace_to"),
+                    Bool(args, "dry_run", true), Int(args, "max_files", 50)),
+                "web_search_results" => await BrowserService.SearchResultsAsync(
+                        Str(args, "query"),
+                        string.IsNullOrWhiteSpace(Str(args, "engine")) ? "bing" : Str(args, "engine"),
+                        Int(args, "max", 5), ct)
+                    .ConfigureAwait(false),
                 _ => $"错误：未知工具 {name}",
             };
         }
@@ -1352,6 +1421,180 @@ public static class WindowsAgentToolkit
         }
 
         sb.AppendLine($"命中: {count}（上限 {max}）");
+        return sb.ToString().Trim();
+    }
+
+    private static List<string> EnumerateMatchFiles(string root, string pattern, int max)
+    {
+        root = Expand(root);
+        pattern = string.IsNullOrWhiteSpace(pattern) ? "*" : pattern.Trim();
+        max = Math.Clamp(max, 1, 200);
+        var list = new List<string>();
+        if (!Directory.Exists(root))
+            return list;
+        try
+        {
+            foreach (var f in Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories))
+            {
+                list.Add(f);
+                if (list.Count >= max)
+                    break;
+            }
+        }
+        catch
+        {
+            // ignore partial
+        }
+
+        return list;
+    }
+
+    private static string BatchSearch(string root, string pattern, int max)
+    {
+        root = Expand(string.IsNullOrWhiteSpace(root) ? "桌面" : root);
+        if (!Directory.Exists(root))
+            return $"错误：根目录不存在 {root}";
+        max = Math.Clamp(max, 1, 200);
+        var files = EnumerateMatchFiles(root, pattern, max);
+        var sb = new StringBuilder();
+        sb.AppendLine($"【批量搜索】root={root} pattern={pattern}");
+        sb.AppendLine($"命中 {files.Count} 个（上限 {max}）");
+        var i = 1;
+        foreach (var f in files)
+        {
+            long size = 0;
+            try { size = new FileInfo(f).Length; } catch { /* ignore */ }
+            sb.AppendLine($"{i}. {f}  ({size} bytes)");
+            i++;
+        }
+
+        if (files.Count == 0)
+            sb.AppendLine("（无匹配文件）");
+        return sb.ToString().Trim();
+    }
+
+    private static string BatchMove(string root, string pattern, string dest, bool dryRun, int maxFiles)
+    {
+        root = Expand(string.IsNullOrWhiteSpace(root) ? "桌面" : root);
+        dest = Expand(dest);
+        if (!Directory.Exists(root))
+            return $"错误：根目录不存在 {root}";
+        if (string.IsNullOrWhiteSpace(dest))
+            return "错误：destination 为空";
+        maxFiles = Math.Clamp(maxFiles, 1, 100);
+        var files = EnumerateMatchFiles(root, pattern, maxFiles);
+        var sb = new StringBuilder();
+        sb.AppendLine(dryRun
+            ? $"【批量移动·预览 dry_run=true】{files.Count} 个 → {dest}"
+            : $"【批量移动·执行】{files.Count} 个 → {dest}");
+        if (files.Count == 0)
+        {
+            sb.AppendLine("无匹配文件，未做任何事。");
+            return sb.ToString().Trim();
+        }
+
+        if (!dryRun)
+            Directory.CreateDirectory(dest);
+
+        var ok = 0;
+        var fail = 0;
+        foreach (var f in files)
+        {
+            var name = Path.GetFileName(f);
+            var target = Path.Combine(dest, name);
+            if (dryRun)
+            {
+                sb.AppendLine($"· {f} → {target}");
+                ok++;
+                continue;
+            }
+
+            try
+            {
+                if (File.Exists(target))
+                    target = Path.Combine(dest, Path.GetFileNameWithoutExtension(name) + "_" + DateTime.Now.ToString("HHmmss") + Path.GetExtension(name));
+                File.Move(f, target);
+                sb.AppendLine($"✓ {f} → {target}");
+                ok++;
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine($"✗ {f}: {ex.Message}");
+                fail++;
+            }
+        }
+
+        sb.AppendLine(dryRun
+            ? $"预览完毕。确认后请再调用 batch_move(dry_run=false)。成功预览 {ok}。"
+            : $"完成：成功 {ok}，失败 {fail}。");
+        return sb.ToString().Trim();
+    }
+
+    private static string BatchRename(string root, string pattern, string from, string to, bool dryRun, int maxFiles)
+    {
+        root = Expand(string.IsNullOrWhiteSpace(root) ? "桌面" : root);
+        if (!Directory.Exists(root))
+            return $"错误：根目录不存在 {root}";
+        if (string.IsNullOrEmpty(from))
+            return "错误：replace_from 为空";
+        to ??= "";
+        maxFiles = Math.Clamp(maxFiles, 1, 100);
+        var files = EnumerateMatchFiles(root, pattern, maxFiles);
+        var sb = new StringBuilder();
+        sb.AppendLine(dryRun
+            ? $"【批量重命名·预览】'{from}' → '{to}'，候选 {files.Count}"
+            : $"【批量重命名·执行】'{from}' → '{to}'");
+        var ok = 0;
+        var skip = 0;
+        var fail = 0;
+        foreach (var f in files)
+        {
+            var name = Path.GetFileName(f);
+            if (!name.Contains(from, StringComparison.Ordinal))
+            {
+                skip++;
+                continue;
+            }
+
+            var newName = name.Replace(from, to, StringComparison.Ordinal);
+            if (string.IsNullOrWhiteSpace(newName) || newName == name)
+            {
+                skip++;
+                continue;
+            }
+
+            var dir = Path.GetDirectoryName(f) ?? root;
+            var target = Path.Combine(dir, newName);
+            if (dryRun)
+            {
+                sb.AppendLine($"· {name} → {newName}");
+                ok++;
+                continue;
+            }
+
+            try
+            {
+                if (File.Exists(target))
+                {
+                    sb.AppendLine($"✗ 跳过（目标已存在）: {target}");
+                    fail++;
+                    continue;
+                }
+
+                File.Move(f, target);
+                sb.AppendLine($"✓ {name} → {newName}");
+                ok++;
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine($"✗ {name}: {ex.Message}");
+                fail++;
+            }
+        }
+
+        sb.AppendLine(dryRun
+            ? $"预览 {ok} 项，跳过 {skip}。确认后 dry_run=false 执行。"
+            : $"完成：成功 {ok}，失败 {fail}，跳过 {skip}。");
         return sb.ToString().Trim();
     }
 

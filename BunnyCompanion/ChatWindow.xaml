@@ -156,6 +156,11 @@
           </StackPanel>
 
           <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+            <!-- 陪伴 / 办公 Agent 模式切换（参考 Claude Code 多步工具） -->
+            <Button x:Name="ModeToggleButton" Content="💬" Style="{StaticResource WxIconButton}"
+                    ToolTip="当前：陪伴模式。点击切换到办公 Agent"
+                    Click="ModeToggleButton_Click" FontSize="14"
+                    AutomationProperties.Name="切换陪伴或办公模式" />
             <!-- 右上角：随时开/关朗读；关时立即停止当前播放 -->
             <Button x:Name="SoundToggleButton" Content="🔊" Style="{StaticResource WxIconButton}"
                     ToolTip="声音开：点击关闭朗读"
@@ -190,6 +195,12 @@
           <Button Content="设个提醒" Style="{StaticResource WxChip}" Click="QuickChip_Click" Tag="提醒我30分钟后起来喝水活动一下" />
           <Button Content="今日卡片" Style="{StaticResource WxChip}" Click="QuickChip_Click" Tag="给我一张今日陪伴卡，穿搭和习惯都来点" />
           <Button Content="列桌面文件" Style="{StaticResource WxChip}" Click="QuickChip_Click" Tag="列出我桌面上的文件和文件夹" />
+          <Button Content="整理桌面PDF" Style="{StaticResource WxChip}" Click="QuickChip_Click"
+                  Tag="【办公任务】先 plan_set 再批量搜索桌面 *.pdf，用 batch_move dry_run 预览整理到「文档\\PDF」，列出清单等我确认" />
+          <Button Content="搜网页摘要" Style="{StaticResource WxChip}" Click="QuickChip_Click"
+                  Tag="用 web_search_results 搜索：Windows 11 清理磁盘空间技巧，总结 3 条可执行建议" />
+          <Button Content="写个备忘文件" Style="{StaticResource WxChip}" Click="QuickChip_Click"
+                  Tag="在文档目录写一个 today-notes.txt，内容是今日待办三条，写完告诉我完整路径" />
           <Button Content="想你了" Style="{StaticResource WxChip}" Click="QuickChip_Click" Tag="想你了" />
           <Button Content="好累呀" Style="{StaticResource WxChip}" Click="QuickChip_Click" Tag="好累呀" />
         </StackPanel>
