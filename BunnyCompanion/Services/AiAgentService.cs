@@ -175,7 +175,7 @@ public sealed class AiAgentService
                      ? AiConfig.OpenRouterFreeVisionModels
                      : AiConfig.OpenRouterFreeTextModels)
         {
-            progress?.Report($"备用通道 {ShortModel(model)}…");
+            progress?.Report("正在换条线路想想…");
             var hit = await TryAgentLoopAsync(
                 providerLabel: $"OpenRouter·{ShortModel(model)}",
                 baseUrl: AiConfig.OpenRouterBaseUrl,

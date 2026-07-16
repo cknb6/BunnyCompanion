@@ -14,6 +14,14 @@ internal static class AiConfig
     public const string StepModel = "step-3.7-flash";
     public const string StepEffort = "low";
 
+    // ---------- 阶跃语音（TTS / ASR，复用 StepApiKey，界面不暴露接口名） ----------
+    /// <summary>语音合成模型，step-tts-mini 便宜稳定。</summary>
+    public const string StepTtsModel = "step-tts-mini";
+    /// <summary>语音识别模型，0.15 元/小时，几乎免费。</summary>
+    public const string StepAsrModel = "stepaudio-2.5-asr";
+    /// <summary>默认音色（磁性男声）；可换 younvwangsheng 等官方音色。</summary>
+    public const string StepTtsVoice = "cixingnansheng";
+
     // ---------- OpenRouter 免费模型（在线兜底，永不过期 key） ----------
     public const string OpenRouterBaseUrl = "https://openrouter.ai/api/v1";
     public const string OpenRouterApiKey = "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";

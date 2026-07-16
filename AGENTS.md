@@ -86,9 +86,18 @@ BunnyCompanion/
 | list_dir / read_file / write_file / move_path / … | 本机文件 |
 | run_command | PowerShell（有高危护栏） |
 | get_clipboard / open_path / get_process_list | 其它本机能力 |
+| get_system_monitor | CPU/内存/电池/闲置快照（`SystemMonitorService`） |
+| fetch_url / web_search / read_browser_tab / open_url | 网页抓取与浏览器（`BrowserService`） |
+| skill_list / skill_get / skill_run | 技能插件（`SkillPluginService`，Markdown 技能目录） |
 
 配置：`Services/AiConfig.cs`（密钥勿再扩散到新公开文案）。  
 `app.manifest`：`highestAvailable`（有管理员则提升，便于 Agent 写更多路径）。
+
+### 界面不暴露 API 规则（重要）
+- 用户可见文本（状态栏、气泡、关于框、托盘菜单）**不得出现** step/阶跃/OpenRouter/模型名/API key 等接口细节。
+- `ChatWindow.ShortProvider` 把内部 provider 统一转成「在线」「本地陪伴」。
+- `AiAgentService` 的 progress 文案用「小申 Agent 思考中…」「正在换条线路想想…」，不报模型名。
+- 模型名/key 只存在于 `AiConfig.cs`（internal）与后台调用，不进 UI。
 
 ## 交互与记忆
 
@@ -100,17 +109,34 @@ BunnyCompanion/
 - **天气**：`get_weather` + `WeatherReport` 高温/降水/雷电等预警；上午可主动轻量天气气泡。
 - **穿透**：`ClickThrough` 或托盘 Ctrl+Shift+P；开启时点不上是预期行为。
 
+## 新增四大功能（v1.2）
+
+- **系统监控触发器**（`SystemMonitorService` + `SystemTriggerConfig`）：CPU/内存过高、低电量、久坐离开 → 桌宠自动提醒+动作。`MainWindow.SystemTriggerTimer` 2 分钟采样，节流冷却避免刷屏，安静时段不打断。配置在 `PetSettings.SystemTriggers`。
+- **浏览器控制+网页总结**（`BrowserService`）：`fetch_url` 抓网页正文（去标签）、`web_search` 打开搜索、`read_browser_tab` 读前台浏览器标签、`open_url` 打开网址。纯 HttpClient，无 NuGet。
+- **技能插件系统**（`SkillPluginService`）：`%LocalAppData%\BunnyCompanion\skills\` 下 Markdown 技能（frontmatter: name/description/triggers/command + 正文指令）。`skill_list/get/run` 工具。内置清理临时文件、今日待办、打开常用示例。`CompanionRuntime.Skills` 单例。
+- **语音输入+TTS**（`VoiceService`）：TTS 优先阶跃在线（`step-tts-mini`，复用 `StepApiKey`，真人级）→ SAPI 离线兜底；ASR 用 SAPI（PowerShell 调 `System.Speech.Recognition`）。`PetSettings.TtsEnabled`/`VoiceInputEnabled` 开关。界面只显示「语音输入/朗读」。
+
+## 版本号（单一来源）
+
+- 唯一来源：`BunnyCompanion.csproj` 的 `<Version>`（如 1.2.0）。
+- `AppCredits.VersionLabel` 运行时读程序集版本，不再硬编码。
+- CI Release tag = `v<Version>.<run_number>`，从 csproj 提取，不写死。
+- `Build-Windows.ps1` 校验文件头也从 csproj 读版本。
+
 ## 自检命令
 
 ```bash
 # 离线词库
-dotnet run --project tools/OfflineFallbackCheck/OfflineFallbackCheck.csproj -c Release
+ dotnet run --project tools/OfflineFallbackCheck/OfflineFallbackCheck.csproj -c Release
 
 # 编译（macOS 加 EnableWindowsTargeting）
-dotnet build BunnyCompanion.sln -c Release -p:EnableWindowsTargeting=true
+dotnet build BunnyCompanion/BunnyCompanion.csproj -c Release -r win-x64 -p:EnableWindowsTargeting=true --self-contained false
 
-# 记忆/天气等纯逻辑单测（tools/GoalVerify）
-dotnet test tools/GoalVerify/GoalVerify.csproj -c Release
+# 记忆/天气/鼠标/agent.md 等纯逻辑自检（tools/GoalVerify，是 Exe 不是测试框架）
+dotnet run --project tools/GoalVerify/GoalVerify.csproj -c Release
+
+# 结构校验（XML/XAML 事件/48 精灵/动作引用/可移植性）
+python3 tools/validate_project.py
 ```
 
 ## 已知风险
@@ -119,3 +145,5 @@ dotnet test tools/GoalVerify/GoalVerify.csproj -c Release
 - 公网 IP 定位在公司出口可能偏到机房/总部城市。
 - Actions 依赖 GitHub 账号 Actions 额度；billing 锁定会导致 `startup_failure`。
 - 仓库若曾提交 API Key，轮换密钥并避免再进公开 README。
+- 阶跃在线 TTS/ASR 需联网且 key 有效；断网或 key 失效时 TTS 回退 SAPI 系统语音，ASR 仅 SAPI 可用。
+- `read_browser_tab` 当前仅返回前台浏览器进程名+标题，地址栏 URL 受 UI Automation 限制未实现，引导用户用 `fetch_url`。
