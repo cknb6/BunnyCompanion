@@ -634,6 +634,24 @@ void Fail(string msg)
     else
         Ok("AgentSystemPrompt.BuildOffice 存在");
 
+    // 办公循环不得「工具跑了却整链失败」：源码须含累计工具结果 + 收尾兜底
+    var agentPath = Path.Combine(repoRoot, "BunnyCompanion", "Services", "AiAgentService.cs");
+    var agentSrc = File.Exists(agentPath) ? File.ReadAllText(agentPath) : "";
+    if (!agentSrc.Contains("accumulatedToolResults", StringComparison.Ordinal)
+        || !agentSrc.Contains("办公·工具兜底", StringComparison.Ordinal)
+        || !agentSrc.Contains("OfficeEmptyAfterToolsRetries", StringComparison.Ordinal))
+        Fail("AiAgentService 办公兜底路径缺失");
+    else
+        Ok("办公 Agent 工具累计+兜底路径存在");
+
+    var cfgPath2 = Path.Combine(repoRoot, "BunnyCompanion", "Services", "AiConfig.cs");
+    var cfg2 = File.Exists(cfgPath2) ? File.ReadAllText(cfgPath2) : "";
+    if (!cfg2.Contains("OfficeEmptyAfterToolsRetries", StringComparison.Ordinal)
+        || !cfg2.Contains("StepOfficeEffort = \"low\"", StringComparison.Ordinal))
+        Fail("AiConfig 办公 low effort / 空 content 重试配置缺失");
+    else
+        Ok("办公配置 low effort + 空 content 重试 OK");
+
     File.WriteAllText(Path.Combine(scratch, "office_plan.txt"), st + "\n---\n" + set + "\n");
 }
 

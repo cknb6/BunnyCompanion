@@ -74,9 +74,14 @@ internal static class AiConfig
     public const int MaxToolResultChars = 12000;
 
     // ---------- 办公模式阶跃预算（对齐 Claude Code 式多步执行） ----------
-    public const int StepOfficeMaxTokens = 2800;
-    public const int StepOfficeMinMaxTokens = 1200;
-    public const int StepOfficeTimeoutSeconds = 60;
-    /// <summary>办公模式推理强度：medium，兼顾工具规划与速度。</summary>
-    public const string StepOfficeEffort = "medium";
+    /// <summary>办公正文要够长，避免 reasoning 占满后 content 空导致「做到一半就停」。</summary>
+    public const int StepOfficeMaxTokens = 3600;
+    public const int StepOfficeMinMaxTokens = 1600;
+    public const int StepOfficeTimeoutSeconds = 90;
+    /// <summary>
+    /// 办公用 low：medium 时 step 易把 token 吃进 reasoning，工具跑完后空 content 整链失败。
+    /// </summary>
+    public const string StepOfficeEffort = "low";
+    /// <summary>工具跑完后 content 仍空时，办公模式最多再催几轮总结。</summary>
+    public const int OfficeEmptyAfterToolsRetries = 3;
 }

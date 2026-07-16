@@ -274,6 +274,7 @@ public sealed class AiAgentService
                     officeMode: false,
                     progress: progress,
                     toolTrace: toolTrace,
+                    accumulatedToolResults: null,
                     extra: node => node["reasoning_effort"] = AiConfig.StepEffort,
                     requestTimeoutSeconds: Math.Min(AiConfig.StepRequestTimeoutSeconds, 28),
                     cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -299,6 +300,8 @@ public sealed class AiAgentService
             var stepMaxTokens = officeMode ? AiConfig.StepOfficeMaxTokens : AiConfig.StepDefaultMaxTokens;
             var stepTimeout = officeMode ? AiConfig.StepOfficeTimeoutSeconds : AiConfig.StepRequestTimeoutSeconds;
             var stepEffort = officeMode ? AiConfig.StepOfficeEffort : AiConfig.StepEffort;
+            // 办公：累计全部工具原文，循环内失败也能交付，避免「工具跑了却整链 null」
+            var officeToolBag = officeMode ? new List<string>() : null;
             var step = await TryAgentLoopAsync(
                 providerLabel: officeMode ? "阶跃·办公" : "阶跃·3.7",
                 baseUrl: AiConfig.StepBaseUrl,
@@ -313,6 +316,7 @@ public sealed class AiAgentService
                 officeMode: officeMode,
                 progress: progress,
                 toolTrace: toolTrace,
+                accumulatedToolResults: officeToolBag,
                 extra: node => node["reasoning_effort"] = stepEffort,
                 requestTimeoutSeconds: stepTimeout,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -324,17 +328,59 @@ public sealed class AiAgentService
                     s.Provider, toolTrace, pendingUserTurn, userText: text);
             }
 
-            // 办公模式：阶跃 tools 失败时不假装无工具干活，直接带痕迹诚实失败
+            // 办公：主循环 null 时先用已累计工具结果交付；再试一轮「无 tools 总结」
             if (officeMode)
             {
+                if (officeToolBag is { Count: > 0 })
+                {
+                    progress?.Report("工具已执行，整理结果…");
+                    // 再试一次：把工具结果塞进 system，强制纯文本总结（不再调工具，避免半截停）
+                    var salvagePrompt = systemPrompt +
+                        "\n\n# 本回合已执行工具的真实结果（必须据此用中文交付，禁止再说没跑通）\n" +
+                        string.Join("\n\n", officeToolBag.Take(8)) +
+                        "\n\n请直接给用户完整中文结论，不要空回复，不要再调用工具。";
+                    var salvage = await TryAgentLoopAsync(
+                        providerLabel: "阶跃·办公·收尾",
+                        baseUrl: AiConfig.StepBaseUrl,
+                        apiKey: AiConfig.StepApiKey,
+                        model: AiConfig.StepModel,
+                        openRouter: false,
+                        systemPrompt: salvagePrompt,
+                        history: historySnapshot,
+                        images: Array.Empty<ImageInput>(),
+                        maxTokens: Math.Max(AiConfig.StepOfficeMaxTokens, 2000),
+                        enableTools: false,
+                        officeMode: true,
+                        progress: progress,
+                        toolTrace: toolTrace,
+                        accumulatedToolResults: null,
+                        extra: node => node["reasoning_effort"] = "low",
+                        requestTimeoutSeconds: 55,
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
+                    if (salvage is { } sv && !string.IsNullOrWhiteSpace(sv.Text))
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        return Finalize((sv.Text, InferAction(sv.Text)), settings,
+                            usedVisual: false, usedDesktop: desktopCaptured,
+                            sv.Provider, toolTrace, pendingUserTurn, userText: text);
+                    }
+
+                    // 模型仍空：本地拼装工具结果，绝不报「没跑通」
+                    var localDeliver = FormatToolResultsFallback(officeToolBag);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return Finalize((localDeliver, "curious"), settings,
+                        usedVisual: false, usedDesktop: desktopCaptured,
+                        "办公·工具兜底", toolTrace, pendingUserTurn, userText: text);
+                }
+
                 var officeFail =
-                    "办公 Agent 这轮没跑通在线工具链（超时或接口异常）。\n" +
-                    "请再试一次，或把任务拆小一点（例如先 list_dir 再 read_file）。\n" +
-                    (toolTrace.Count > 0
-                        ? "已记录步骤: " + string.Join(" → ", toolTrace.Distinct().Take(12))
-                        : "尚未成功调用本机工具。");
+                    "办公 Agent 这轮在线接口不稳定（超时或空回复），还没来得及执行本机工具。\n" +
+                    "请再发一次，或把任务拆小一点（例如先「列桌面文件」再「移动 pdf」）。\n" +
+                    (toolTrace.Count > 1
+                        ? "痕迹: " + string.Join(" → ", toolTrace.Distinct().Take(12))
+                        : "");
                 cancellationToken.ThrowIfCancellationRequested();
-                return Finalize((officeFail, "sad"), settings,
+                return Finalize((officeFail.Trim(), "sad"), settings,
                     usedVisual: false, usedDesktop: desktopCaptured,
                     "办公·中断", toolTrace, pendingUserTurn, userText: text);
             }
@@ -355,6 +401,7 @@ public sealed class AiAgentService
                 officeMode: false,
                 progress: progress,
                 toolTrace: toolTrace,
+                accumulatedToolResults: null,
                 extra: node => node["reasoning_effort"] = AiConfig.StepEffort,
                 requestTimeoutSeconds: AiConfig.StepRequestTimeoutSeconds,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -386,6 +433,7 @@ public sealed class AiAgentService
                     officeMode: false,
                     progress: progress,
                     toolTrace: toolTrace,
+                    accumulatedToolResults: null,
                     extra: null,
                     requestTimeoutSeconds: AiConfig.FallbackRequestTimeoutSeconds,
                     cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -442,10 +490,12 @@ public sealed class AiAgentService
         bool officeMode,
         IProgress<string>? progress,
         List<string> toolTrace,
+        List<string>? accumulatedToolResults,
         Action<JsonObject>? extra,
         int requestTimeoutSeconds,
         CancellationToken cancellationToken)
     {
+        List<string>? lastToolResults = null;
         try
         {
             // 阶跃：max_tokens 太小会被 reasoning 吃光，content 变空 → 误判失败 → 整条备用链拖死
@@ -459,8 +509,17 @@ public sealed class AiAgentService
             var tools = enableTools ? WindowsAgentToolkit.BuildToolDefinitions() : null;
             var emptyContentRetries = 0;
             var emptyAfterToolsRetries = 0;
-            List<string>? lastToolResults = null;
+            var maxEmptyAfterTools = officeMode ? AiConfig.OfficeEmptyAfterToolsRetries : 1;
             var maxRounds = officeMode ? AiConfig.MaxToolRoundsOffice : AiConfig.MaxToolRounds;
+
+            LoopHit? DeliverToolsOrNull()
+            {
+                if (accumulatedToolResults is { Count: > 0 })
+                    return new LoopHit(FormatToolResultsFallback(accumulatedToolResults), providerLabel);
+                if (lastToolResults is { Count: > 0 })
+                    return new LoopHit(FormatToolResultsFallback(lastToolResults), providerLabel);
+                return null;
+            }
 
             for (var round = 0; round < maxRounds; round++)
             {
@@ -468,14 +527,13 @@ public sealed class AiAgentService
                 {
                     ["model"] = model,
                     ["messages"] = messages,
-                    ["temperature"] = officeMode ? 0.45 : 0.7,
+                    ["temperature"] = officeMode ? 0.35 : 0.7,
                     ["max_tokens"] = maxTokens,
                 };
                 if (tools is not null)
                 {
                     payload["tools"] = tools.DeepClone();
                     payload["tool_choice"] = "auto";
-                    // Step Plan / OpenAI 兼容：允许多工具并行，减少往返
                     if (!openRouter)
                         payload["parallel_tool_calls"] = true;
                 }
@@ -483,7 +541,7 @@ public sealed class AiAgentService
                 extra?.Invoke(payload);
 
                 using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                var cap = officeMode ? 120 : 90;
+                var cap = officeMode ? 150 : 90;
                 timeoutCts.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(requestTimeoutSeconds, 8, cap)));
 
                 string json;
@@ -498,19 +556,21 @@ public sealed class AiAgentService
                 }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                 {
-                    // 单请求超时：若本轮已跑过工具，用工具结果兜底，避免办公模式误报「整链失败」
-                    progress?.Report("想得有点久，换条路…");
-                    if (lastToolResults is { Count: > 0 })
-                        return new LoopHit(FormatToolResultsFallback(lastToolResults), providerLabel);
-                    return null;
+                    progress?.Report("想得有点久，先用已有结果…");
+                    return DeliverToolsOrNull();
                 }
 
                 var parsed = ParseAssistantMessage(json);
                 if (parsed is null)
+                {
+                    // 解析失败也不得丢掉已执行工具
+                    var fallback = DeliverToolsOrNull();
+                    if (fallback is not null)
+                        return fallback;
                     return null;
+                }
 
-                // 有 tool_calls（官方 JSON 或正文里伪 XML）：执行并回灌
-                // Step 在 finish_reason=tool_calls 时 content 经常为空字符串，这是正常现象，不能当失败。
+                // 有 tool_calls：执行并回灌（content 空是正常的）
                 if (enableTools && parsed.ToolCalls is { Count: > 0 })
                 {
                     var fromPseudo = parsed.ToolCallsFromContent;
@@ -528,11 +588,26 @@ public sealed class AiAgentService
                         NormalizeZodiacArgs(argsObj);
                         NormalizePathArgs(call.Name, argsObj);
 
-                        var result = await WindowsAgentToolkit.ExecuteAsync(call.Name, argsObj, cancellationToken)
-                            .ConfigureAwait(false);
+                        string result;
+                        try
+                        {
+                            result = await WindowsAgentToolkit.ExecuteAsync(call.Name, argsObj, cancellationToken)
+                                .ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                        {
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            result = $"工具执行异常: {ex.GetType().Name}: {ex.Message}";
+                        }
+
                         if (result.Length > AiConfig.MaxToolResultChars)
                             result = result[..AiConfig.MaxToolResultChars] + "\n…(工具输出截断)";
-                        toolResults.Add($"【{call.Name}】\n{result}");
+                        var block = $"【{call.Name}】\n{result}";
+                        toolResults.Add(block);
+                        accumulatedToolResults?.Add(block);
 
                         messages.Add(new JsonObject
                         {
@@ -544,25 +619,25 @@ public sealed class AiAgentService
                     }
 
                     lastToolResults = toolResults;
+                    // 每跑完工具就清零「空 content 重试」，给总结多几次机会
+                    emptyAfterToolsRetries = 0;
 
-                    // 确定性本地工具 + 正文几乎全是伪 XML：直接回结果，避免再调模型胡写
                     if (fromPseudo && toolResults.Count > 0 && LooksLikeOnlyToolMarkup(parsed.Content)
                         && parsed.ToolCalls.All(c => IsDeterministicLocalTool(c.Name)))
                     {
                         return new LoopHit(string.Join("\n\n", toolResults), providerLabel);
                     }
 
-                    // 工具后约束：办公模式可继续多步；陪伴模式倾向收口总结
+                    // 办公：优先能交付就交付，避免一直 tool 到超时空 content
                     messages.Add(new JsonObject
                     {
                         ["role"] = "user",
                         ["content"] = officeMode
-                            ? "工具结果已回灌。" +
-                              "可读/搜索/plan 步骤可继续；" +
-                              "若刚完成 batch_* 预览（dry_run=true）：必须先把清单用中文给用户看并停下来等确认，禁止同轮 dry_run=false。" +
-                              "真正执行批量须用户确认后（或用户已说直接执行时 confirm=true）。" +
-                              "换任务用 plan_clear 或 plan_set 覆盖。" +
-                              "任务真正完成时再最终交付：做了什么、路径、未完成项。禁止 tool XML。"
+                            ? "工具结果已回灌。请立刻二选一（禁止空回复）：\n" +
+                              "A) 信息已够：用简体中文直接交付结论（做了什么、关键结果、下一步建议）；\n" +
+                              "B) 还缺一步：只再调用必要工具，不要重复已成功的调用。\n" +
+                              "batch_* 预览后须把清单给用户并停下，禁止同轮 dry_run=false。\n" +
+                              "禁止输出 tool_call/XML。必须有可见中文正文。"
                             : "工具结果已全部给你。请用温柔简体中文直接回答用户：" +
                               "总结要点、说明已做了什么；禁止输出 <tool_call>、<function>、XML 或 JSON 伪代码；" +
                               "不要重复工具原始日志，改成口语。",
@@ -576,44 +651,47 @@ public sealed class AiAgentService
                     var cleaned = StripToolMarkup(parsed.Content);
                     if (string.IsNullOrWhiteSpace(cleaned))
                     {
-                        // 清洗后变空：若刚跑过工具，用工具结果兜底，勿整链失败
-                        if (lastToolResults is { Count: > 0 })
-                            return new LoopHit(FormatToolResultsFallback(lastToolResults), providerLabel);
+                        var fb = DeliverToolsOrNull();
+                        if (fb is not null)
+                            return fb;
                         return null;
                     }
 
                     return new LoopHit(cleaned, providerLabel);
                 }
 
-                // content 空 + 已有工具结果：再催一轮总结；仍空则本地拼装结果（绝不判「API 没调」）
-                if (lastToolResults is { Count: > 0 })
+                // content 空 + 已有工具：多催几轮（办公 3 次），仍空则本地拼装
+                if (lastToolResults is { Count: > 0 } || accumulatedToolResults is { Count: > 0 })
                 {
-                    if (emptyAfterToolsRetries < 1)
+                    if (emptyAfterToolsRetries < maxEmptyAfterTools)
                     {
                         emptyAfterToolsRetries++;
                         messages.Add(new JsonObject
                         {
                             ["role"] = "user",
-                            ["content"] = "请只输出给用户看的最终中文回答，不要空回复，不要工具标签。",
+                            ["content"] =
+                                "你刚才返回了空正文。请现在只用中文写最终回答（至少 2 句），" +
+                                "根据已有工具结果总结，禁止空回复，禁止再调工具，禁止 XML。",
                         });
-                        progress?.Report("工具已跑完，正在整理回答…");
+                        progress?.Report($"工具已跑完，正在整理回答（{emptyAfterToolsRetries}/{maxEmptyAfterTools}）…");
+                        // 加大 token，减轻 reasoning 占满
+                        if (officeMode)
+                            maxTokens = Math.Min(Math.Max(maxTokens, 2400), 4000);
                         continue;
                     }
 
-                    return new LoopHit(FormatToolResultsFallback(lastToolResults), providerLabel);
+                    return DeliverToolsOrNull();
                 }
 
-                // content 空：finish_reason=length 时加 token 再试一次
                 if (string.Equals(parsed.FinishReason, "length", StringComparison.OrdinalIgnoreCase)
                     && emptyContentRetries < 1)
                 {
                     emptyContentRetries++;
-                    maxTokens = Math.Min(Math.Max(maxTokens * 2, 1600), 3200);
+                    maxTokens = Math.Min(Math.Max(maxTokens * 2, 1600), officeMode ? 4000 : 3200);
                     progress?.Report("回复被截断，再补一刀…");
                     continue;
                 }
 
-                // 仍无正文：尝试从 reasoning 里抽最后一句可读中文（弱兜底）
                 if (!string.IsNullOrWhiteSpace(parsed.ReasoningHint))
                 {
                     var hint = TryExtractReadableReplyFromReasoning(parsed.ReasoningHint);
@@ -621,15 +699,28 @@ public sealed class AiAgentService
                         return new LoopHit(hint!, providerLabel);
                 }
 
-                return null;
+                // 空轮：办公再给一次「必须输出」机会
+                if (officeMode && emptyContentRetries < 2)
+                {
+                    emptyContentRetries++;
+                    messages.Add(new JsonObject
+                    {
+                        ["role"] = "user",
+                        ["content"] = "请直接用中文回答用户问题，不要空回复。若需要工具请调用 tools。",
+                    });
+                    continue;
+                }
+
+                return DeliverToolsOrNull();
             }
 
-            if (lastToolResults is { Count: > 0 })
-                return new LoopHit(FormatToolResultsFallback(lastToolResults), providerLabel);
+            var afterRounds = DeliverToolsOrNull();
+            if (afterRounds is not null)
+                return afterRounds;
 
             return new LoopHit(
                 officeMode
-                    ? $"已达本回合工具步数上限（{maxRounds}）。请根据已有结果继续下达更具体的下一步，或缩小任务范围。"
+                    ? $"本回合工具步骤已较多（上限 {maxRounds}）。请根据上面结果继续说下一步，或缩小任务范围。"
                     : "工具步骤有点多，我先停一下～你再说具体一点目标，我继续帮你弄。",
                 providerLabel);
         }
@@ -643,8 +734,12 @@ public sealed class AiAgentService
         }
         catch (Exception ex)
         {
-            progress?.Report("线路有点不顺，再试…");
+            progress?.Report("线路有点不顺…");
             System.Diagnostics.Debug.WriteLine($"Agent loop fail [{providerLabel}]: {ex.Message}");
+            if (accumulatedToolResults is { Count: > 0 })
+                return new LoopHit(FormatToolResultsFallback(accumulatedToolResults), providerLabel);
+            if (lastToolResults is { Count: > 0 })
+                return new LoopHit(FormatToolResultsFallback(lastToolResults), providerLabel);
             return null;
         }
     }
