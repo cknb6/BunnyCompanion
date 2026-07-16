@@ -333,12 +333,8 @@ public static class SystemMonitorService
                     $"电量只剩 {bat.LifePercent}% 啦，记得接上电源～",
                     $"battery={bat.LifePercent}");
 
-            // 久坐：闲置时长过短说明在用电脑，过小说明离开；取“在电脑前但久未起身”用 idle 反向判断
-            // 这里用 idle < 阈值 表示“一直盯着屏幕没动”，配合外部久坐计时器更准
-            if (cfg.IdleTooLongSeconds > 0 && idleSeconds >= cfg.IdleTooLongSeconds)
-                return new TriggerResult("stretch",
-                    "你好像离开了一会儿，回来啦～先喝口水再继续。",
-                    $"idle={idleSeconds:F0}s");
+            // 久离欢迎仅由 MainWindow 在「返回操作」时触发（HasReturnedFromIdle）。
+            // 人仍离开时不得在此弹出「回来啦」，故忽略 idleSeconds 参数。
         }
         catch
         {

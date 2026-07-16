@@ -157,6 +157,8 @@ public partial class MainWindow : Window
         CreateTrayIcon();
         AttachHotkeys();
         PlayAction("idle");
+        // 记录本机版本，便于自动更新比较
+        try { AppUpdateService.RememberInstalledVersion(); } catch { /* ignore */ }
 
         // 全屏检测始终运行；行为/提醒在 intro 结束后再启动，避免隐藏动画空转。
         _fullscreenTimer.Start();
@@ -237,10 +239,10 @@ public partial class MainWindow : Window
             return;
 
         if (interactive)
-            ShowMessage("正在检查更新…", 2.5);
+            ShowMessage("正在检查更新…", 2.8);
 
         var check = await AppUpdateService.CheckAsync(
-            minInterval: interactive ? TimeSpan.Zero : TimeSpan.FromHours(6),
+            minInterval: interactive ? TimeSpan.Zero : TimeSpan.FromHours(4),
             force: interactive).ConfigureAwait(true);
 
         if (_isExiting || !IsLoaded)
@@ -248,38 +250,44 @@ public partial class MainWindow : Window
 
         if (!check.Success)
         {
-            if (interactive)
-                ShowMessage(check.Message, 5);
+            // 静默检查失败也给一次轻提示，避免「完全没反应」
+            ShowMessage(interactive ? check.Message : "检查更新暂不可用（网络/GitHub）", interactive ? 5.5 : 3.5);
             return;
         }
 
         if (!check.UpdateAvailable)
         {
             if (interactive)
-                ShowMessage(check.Message, 3.5);
+                ShowMessage(check.Message + $"\n当前 {AppUpdateService.FormatVersion(check.LocalVersion)}", 4);
             return;
         }
 
         var remote = check.RemoteVersion is null
             ? check.TagName ?? "?"
             : AppUpdateService.FormatVersion(check.RemoteVersion);
-        var ask = MessageBox.Show(
-            this,
-            $"{check.Message}\n\n" +
-            $"来源：GitHub {AppUpdateService.Owner}/{AppUpdateService.Repo}\n" +
-            $"文件：{check.TargetFileName}\n" +
-            $"SHA256：{check.ExpectedSha256}\n\n" +
-            "将后台下载并用官方 checksums.txt 校验哈希；\n" +
-            "不一致则拒绝安装。通过后会重启完成替换。\n\n" +
-            "现在更新吗？",
-            $"发现新版本 {remote}",
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Question);
 
-        if (ask != MessageBoxResult.Yes)
-            return;
+        // 自动热更新：下载校验通过后覆盖当前 EXE 并重启（交互检查也可选立刻更新）
+        if (interactive)
+        {
+            var ask = MessageBox.Show(
+                this,
+                $"{check.Message}\n\n" +
+                $"来源：GitHub {AppUpdateService.Owner}/{AppUpdateService.Repo}\n" +
+                $"文件：{check.TargetFileName}\n" +
+                $"SHA256：{check.ExpectedSha256}\n\n" +
+                "将自动下载并用 checksums.txt 校验；通过后覆盖当前程序并重启。\n\n" +
+                "现在更新吗？",
+                $"发现新版本 {remote}",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question);
+            if (ask != MessageBoxResult.Yes)
+                return;
+        }
+        else
+        {
+            ShowMessage($"发现新版本 {remote}，正在后台热更新…", 4);
+        }
 
-        ShowMessage("正在下载并校验更新…", 4);
         var progress = new Progress<string>(msg =>
         {
             if (!_isExiting && IsLoaded)
@@ -291,13 +299,16 @@ public partial class MainWindow : Window
 
         if (!apply.Success)
         {
-            MessageBox.Show(this, apply.Message, "更新失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+            if (interactive)
+                MessageBox.Show(this, apply.Message, "更新失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+            else
+                ShowMessage(apply.Message, 5);
             return;
         }
 
-        ShowMessage("校验通过，即将重启…", 2);
-        await Task.Delay(600).ConfigureAwait(true);
-        // 正常退出，让脚本替换 EXE 并拉起新版本
+        ShowMessage("校验通过，即将覆盖并重启…", 2.2);
+        await Task.Delay(500).ConfigureAwait(true);
+        // 退出后 bat/ps1 覆盖当前 EXE 并拉起新版本
         ExitApplication();
     }
 
@@ -1148,10 +1159,17 @@ public partial class MainWindow : Window
 
         if (moved)
         {
-            ScreenService.ClampToWorkingArea(this);
             var dist = Math.Sqrt(dx * dx + dy * dy);
             var dir = MouseReactionCatalog.ResolveDragDirection(dx, dy);
             var intensity = MouseReactionCatalog.ResolveDragIntensity(dist, dragDuration);
+            // 甩飞：沿拖拽方向再冲一段，再钳制回当前显示器工作区，避免只播动作没有「被甩」感
+            if (intensity == DragIntensity.Fling && dist > 1)
+            {
+                var fling = Math.Clamp(dist * 0.42, 80, 260);
+                Left += dx / dist * fling;
+                Top += dy / dist * fling;
+            }
+            ScreenService.ClampToWorkingArea(this);
             var rx = MouseReactionCatalog.PickDragRelease(dir, intensity, _settings.PartnerName, _lastMouseReactionAction);
             ApplyMouseReaction(rx, exclusiveSeconds: 1.8);
             SavePosition();
@@ -1212,37 +1230,13 @@ public partial class MainWindow : Window
     {
         _lastMouseReactionAction = reaction.ActionKey;
         AddAffection(reaction.Affection);
-        // walk 作点击反馈时只播短动作，避免真走起来抢状态
+        // 目录已含 delighted/wink/dizzy_spin 等完整动作，直接播放，禁止旧版「改写到其它 key」冲掉多样性。
+        // 仅 walk：点击反馈只播走路帧却不位移，观感像原地抽，改成 tiptoe 短反馈。
         var key = reaction.ActionKey;
-        if (key.Equals("walk", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("dizzy_spin", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("delighted", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("wink", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("bashful", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("look_back", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("tiptoe", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("land", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("annoyed", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("sleepy", StringComparison.OrdinalIgnoreCase)
-            || key.Equals("celebrate", StringComparison.OrdinalIgnoreCase))
-        {
-            // 映射到目录中已有动作
-            key = key switch
-            {
-                "walk" => "tiptoe",
-                "dizzy_spin" => "surprised",
-                "delighted" => "clap",
-                "wink" => "shy",
-                "bashful" => "shy",
-                "look_back" => "curious",
-                "tiptoe" => "dance",
-                "land" => "recover",
-                "annoyed" => "pout",
-                "sleepy" => "sleep",
-                "celebrate" => "birthday",
-                _ => key,
-            };
-        }
+        if (key.Equals("walk", StringComparison.OrdinalIgnoreCase))
+            key = "tiptoe";
+        else if (!PetActionCatalog.All.ContainsKey(key))
+            key = "curious";
 
         PlayAction(key, exclusiveSeconds: exclusiveSeconds);
         if (!string.IsNullOrWhiteSpace(reaction.Message))

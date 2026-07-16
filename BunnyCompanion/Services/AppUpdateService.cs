@@ -51,19 +51,27 @@ public static class AppUpdateService
         return c;
     }
 
-    /// <summary>当前运行中的本机版本（优先 FileVersion，含 CI 补丁号）。</summary>
+    /// <summary>当前运行中的本机版本（优先 FileVersion 含 CI 补丁号；辅以本机记录）。</summary>
     public static Version GetLocalVersion()
     {
+        Version? best = null;
+        void Consider(Version v)
+        {
+            if (best is null || v > best)
+                best = v;
+        }
+
         try
         {
             var path = Environment.ProcessPath;
             if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
             {
                 var fvi = FileVersionInfo.GetVersionInfo(path);
+                // 单文件发布：FileVersion 常为 1.4.0.31；ProductVersion 可能带元数据
                 if (TryParseVersion(fvi.FileVersion, out var fv))
-                    return fv;
+                    Consider(fv);
                 if (TryParseVersion(fvi.ProductVersion, out var pv))
-                    return pv;
+                    Consider(pv);
             }
         }
         catch
@@ -75,14 +83,46 @@ public static class AppUpdateService
         {
             var v = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
             if (v is not null)
-                return new Version(v.Major, v.Minor, Math.Max(0, v.Build), Math.Max(0, v.Revision));
+                Consider(new Version(v.Major, v.Minor, Math.Max(0, v.Build), Math.Max(0, v.Revision)));
         }
         catch
         {
             // ignore
         }
 
-        return new Version(1, 0, 0, 0);
+        // 更新成功后写入的侧车版本（防止 FileVersion 读不到时永远当成 1.0）
+        try
+        {
+            var side = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "BunnyCompanion", "installed_version.txt");
+            if (File.Exists(side) && TryParseVersion(File.ReadAllText(side).Trim(), out var sv))
+                Consider(sv);
+        }
+        catch
+        {
+            // ignore
+        }
+
+        return best ?? new Version(1, 0, 0, 0);
+    }
+
+    /// <summary>启动或更新成功后记录本机版本，供下次比较。</summary>
+    public static void RememberInstalledVersion(Version? version = null)
+    {
+        try
+        {
+            var v = version ?? GetLocalVersion();
+            var dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "BunnyCompanion");
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(Path.Combine(dir, "installed_version.txt"), FormatVersion(v));
+        }
+        catch
+        {
+            // ignore
+        }
     }
 
     public static string FormatVersion(Version v)
@@ -209,7 +249,26 @@ public static class AppUpdateService
                     tag, notes, exeUrl, sumUrl, null, fileName));
             }
 
+            // 版本更新，或「同版本但哈希不同」（热修包）
             var newer = remote > local;
+            if (!newer && remote >= local)
+            {
+                try
+                {
+                    var exePath = Environment.ProcessPath;
+                    if (!string.IsNullOrWhiteSpace(exePath) && File.Exists(exePath))
+                    {
+                        var localHash = await ComputeSha256HexAsync(exePath, ct).ConfigureAwait(false);
+                        if (!string.Equals(localHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+                            newer = true;
+                    }
+                }
+                catch
+                {
+                    // 哈希读失败则仅按版本号
+                }
+            }
+
             var msg = newer
                 ? $"发现新版本 {FormatVersion(remote)}（当前 {FormatVersion(local)}）"
                 : $"已是最新（{FormatVersion(local)}）";
@@ -297,25 +356,65 @@ public static class AppUpdateService
                 }
             }
 
-            progress?.Report("校验通过，准备替换…");
+            progress?.Report("校验通过，准备覆盖安装…");
+            // 同时写 bat（兼容性更好）+ ps1 双保险
+            var batPath = Path.Combine(updateDir, $"apply_{stamp}.bat");
+            WriteApplyBat(batPath, Environment.ProcessId, tempExe, currentExe, check.TagName ?? "");
             WriteApplyScript(scriptPath, Environment.ProcessId, tempExe, currentExe);
 
-            var psi = new ProcessStartInfo
+            Process? helper = null;
+            try
             {
-                FileName = "powershell.exe",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                ArgumentList =
+                helper = Process.Start(new ProcessStartInfo
                 {
-                    "-NoProfile",
-                    "-ExecutionPolicy", "Bypass",
-                    "-WindowStyle", "Hidden",
-                    "-File", scriptPath,
-                },
-            };
-            Process.Start(psi);
+                    FileName = batPath,
+                    UseShellExecute = true, // 独立会话，主进程退出后仍可覆盖 EXE
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                });
+            }
+            catch
+            {
+                helper = null;
+            }
 
-            return new ApplyResult(true, $"校验通过（SHA256 一致）。即将重启以完成更新到 {check.TagName}。");
+            if (helper is null)
+            {
+                try
+                {
+                    helper = Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "powershell.exe",
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        ArgumentList =
+                        {
+                            "-NoProfile",
+                            "-ExecutionPolicy", "Bypass",
+                            "-WindowStyle", "Hidden",
+                            "-File", scriptPath,
+                        },
+                    });
+                }
+                catch
+                {
+                    helper = null;
+                }
+            }
+
+            if (helper is null)
+            {
+                try { File.Delete(tempExe); } catch { /* ignore */ }
+                try { File.Delete(scriptPath); } catch { /* ignore */ }
+                try { File.Delete(batPath); } catch { /* ignore */ }
+                return new ApplyResult(false, "无法启动更新脚本。请手动从 GitHub Releases 下载覆盖安装。");
+            }
+
+            // 记录即将安装的版本，重启后 GetLocalVersion 可对齐
+            if (check.RemoteVersion is not null)
+                RememberInstalledVersion(check.RemoteVersion);
+
+            return new ApplyResult(true, $"校验通过（SHA256 一致）。即将自动覆盖并重启到 {check.TagName}。");
         }
         catch (OperationCanceledException)
         {
@@ -331,25 +430,70 @@ public static class AppUpdateService
 
     private static void WriteApplyScript(string scriptPath, int pid, string srcExe, string dstExe)
     {
-        // 等原进程退出 → 复制 → 启动 → 清理
+        // 等原进程退出 → 多次重试覆盖 → 启动 → 清理
         var sb = new StringBuilder();
-        sb.AppendLine("$ErrorActionPreference = 'Stop'");
+        sb.AppendLine("$ErrorActionPreference = 'Continue'");
         sb.AppendLine($"$pidToWait = {pid}");
         sb.AppendLine($"$src = {PsQuote(srcExe)}");
         sb.AppendLine($"$dst = {PsQuote(dstExe)}");
-        sb.AppendLine("$deadline = (Get-Date).AddMinutes(2)");
-        sb.AppendLine("while ((Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {");
-        sb.AppendLine("  Start-Sleep -Milliseconds 350");
-        sb.AppendLine("}");
-        sb.AppendLine("Start-Sleep -Milliseconds 400");
-        sb.AppendLine("if (-not (Test-Path -LiteralPath $src)) { exit 2 }");
+        sb.AppendLine("$log = Join-Path $env:LOCALAPPDATA 'BunnyCompanion\\updates\\last_apply.log'");
+        sb.AppendLine("function L([string]$m){ try { Add-Content -LiteralPath $log -Value ((Get-Date).ToString('s') + ' ' + $m) } catch {} }");
+        sb.AppendLine("L 'start apply'");
+        sb.AppendLine("$deadline = (Get-Date).AddMinutes(3)");
+        sb.AppendLine("while ((Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }");
+        sb.AppendLine("Start-Sleep -Milliseconds 600");
+        sb.AppendLine("if (-not (Test-Path -LiteralPath $src)) { L 'src missing'; exit 2 }");
         sb.AppendLine("$bak = $dst + '.bak'");
-        sb.AppendLine("try { if (Test-Path -LiteralPath $dst) { Copy-Item -LiteralPath $dst -Destination $bak -Force } } catch {}");
-        sb.AppendLine("Copy-Item -LiteralPath $src -Destination $dst -Force");
+        sb.AppendLine("try { if (Test-Path -LiteralPath $dst) { Copy-Item -LiteralPath $dst -Destination $bak -Force } } catch { L $_.Exception.Message }");
+        sb.AppendLine("$ok = $false");
+        sb.AppendLine("for ($i=0; $i -lt 25; $i++) {");
+        sb.AppendLine("  try { Copy-Item -LiteralPath $src -Destination $dst -Force; $ok = $true; break } catch { Start-Sleep -Milliseconds 400 }");
+        sb.AppendLine("}");
+        sb.AppendLine("if (-not $ok) { L 'copy failed'; exit 3 }");
+        sb.AppendLine("L 'copy ok'");
         sb.AppendLine("Start-Process -FilePath $dst");
         sb.AppendLine("try { Remove-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue } catch {}");
         sb.AppendLine("try { Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue } catch {}");
         File.WriteAllText(scriptPath, sb.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+    }
+
+    /// <summary>CMD 覆盖脚本：等进程退出后 copy /Y 覆盖当前 EXE 并重启。</summary>
+    private static void WriteApplyBat(string batPath, int pid, string srcExe, string dstExe, string tag)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("@echo off");
+        sb.AppendLine("setlocal");
+        sb.AppendLine($"set \"PID={pid}\"");
+        sb.AppendLine($"set \"SRC={srcExe}\"");
+        sb.AppendLine($"set \"DST={dstExe}\"");
+        sb.AppendLine("set \"LOG=%LOCALAPPDATA%\\BunnyCompanion\\updates\\last_apply.log\"");
+        sb.AppendLine("echo %DATE% %TIME% apply " + tag + " >> \"%LOG%\" 2>nul");
+        sb.AppendLine(":wait");
+        sb.AppendLine("tasklist /FI \"PID eq %PID%\" 2>nul | find \"%PID%\" >nul");
+        sb.AppendLine("if not errorlevel 1 (");
+        sb.AppendLine("  timeout /t 1 /nobreak >nul");
+        sb.AppendLine("  goto wait");
+        sb.AppendLine(")");
+        sb.AppendLine("timeout /t 1 /nobreak >nul");
+        sb.AppendLine("if not exist \"%SRC%\" ( echo src missing >> \"%LOG%\" & exit /b 2 )");
+        sb.AppendLine("if exist \"%DST%\" copy /Y \"%DST%\" \"%DST%.bak\" >nul 2>&1");
+        sb.AppendLine("set /a N=0");
+        sb.AppendLine(":retry");
+        sb.AppendLine("copy /Y \"%SRC%\" \"%DST%\" >nul 2>&1");
+        sb.AppendLine("if errorlevel 1 (");
+        sb.AppendLine("  set /a N+=1");
+        sb.AppendLine("  if %N% LSS 25 (");
+        sb.AppendLine("    timeout /t 1 /nobreak >nul");
+        sb.AppendLine("    goto retry");
+        sb.AppendLine("  ) else (");
+        sb.AppendLine("    echo copy failed >> \"%LOG%\" & exit /b 3");
+        sb.AppendLine("  )");
+        sb.AppendLine(")");
+        sb.AppendLine("echo copy ok >> \"%LOG%\" 2>nul");
+        sb.AppendLine("start \"\" \"%DST%\"");
+        sb.AppendLine("del /F /Q \"%SRC%\" >nul 2>&1");
+        sb.AppendLine("del /F /Q \"%~f0\" >nul 2>&1");
+        File.WriteAllText(batPath, sb.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
     }
 
     private static string PsQuote(string path) =>

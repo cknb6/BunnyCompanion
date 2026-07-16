@@ -268,8 +268,8 @@ public sealed class AiAgentService
                     s.Provider, toolTrace, pendingUserTurn, userText: text);
             }
 
-            // 2) 阶跃纯文本再试（无 tools）
-            progress?.Report("阶跃换种方式再试…");
+            // 2) 阶跃纯文本再试（无 tools）；进度文案不暴露供应商名
+            progress?.Report("换种方式再想想…");
             var stepPlain = await TryAgentLoopAsync(
                 providerLabel: "阶跃·3.7",
                 baseUrl: AiConfig.StepBaseUrl,
@@ -419,8 +419,8 @@ public sealed class AiAgentService
                 }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                 {
-                    // 单请求超时：快速失败，交给上层短兜底
-                    progress?.Report($"{providerLabel} 超时…");
+                    // 单请求超时：快速失败，交给上层短兜底（UI 不暴露线路/模型名）
+                    progress?.Report("想得有点久，换条路…");
                     return null;
                 }
 
@@ -552,7 +552,7 @@ public sealed class AiAgentService
         }
         catch (Exception ex)
         {
-            progress?.Report($"{providerLabel} 异常…");
+            progress?.Report("线路有点不顺，再试…");
             System.Diagnostics.Debug.WriteLine($"Agent loop fail [{providerLabel}]: {ex.Message}");
             return null;
         }
