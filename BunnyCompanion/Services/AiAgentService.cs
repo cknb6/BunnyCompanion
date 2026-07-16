@@ -498,8 +498,10 @@ public sealed class AiAgentService
                 }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
                 {
-                    // 单请求超时：快速失败，交给上层短兜底（UI 不暴露线路/模型名）
+                    // 单请求超时：若本轮已跑过工具，用工具结果兜底，避免办公模式误报「整链失败」
                     progress?.Report("想得有点久，换条路…");
+                    if (lastToolResults is { Count: > 0 })
+                        return new LoopHit(FormatToolResultsFallback(lastToolResults), providerLabel);
                     return null;
                 }
 

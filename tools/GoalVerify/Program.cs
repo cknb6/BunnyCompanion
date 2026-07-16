@@ -325,6 +325,74 @@ void Fail(string msg)
         Fail("非 GitHub 域名不应放行");
     else
         Ok("URL 拒绝第三方域名 OK");
+
+    // 403/429 中文限流文案（真实 FormatGitHubHttpError，非拷贝）
+    var m403 = AppUpdateService.FormatGitHubHttpError(403, "API rate limit exceeded", "120");
+    if (m403.Contains("HTTP 403", StringComparison.Ordinal)
+        && !m403.Contains("频率限制", StringComparison.Ordinal)
+        && !m403.Contains("限流", StringComparison.Ordinal)
+        && !m403.Contains("稍后再试", StringComparison.Ordinal))
+        Fail("403 文案不得只剩裸 HTTP 403: " + m403);
+    if (!m403.Contains("稍后再试", StringComparison.Ordinal)
+        && !m403.Contains("频率限制", StringComparison.Ordinal)
+        && !m403.Contains("受限", StringComparison.Ordinal))
+        Fail("403 应含限流/稍后再试类中文: " + m403);
+    if (!m403.Contains("releases", StringComparison.OrdinalIgnoreCase))
+        Fail("403 文案应引导 Releases 页");
+    else
+        Ok("FormatGitHubHttpError 403 OK");
+
+    var m429 = AppUpdateService.FormatGitHubHttpError(429, null, "30");
+    if (!m429.Contains("稍后再试", StringComparison.Ordinal) && !m429.Contains("受限", StringComparison.Ordinal))
+        Fail("429 文案应提示稍后再试");
+    else
+        Ok("FormatGitHubHttpError 429 OK");
+
+    if (!AppUpdateService.IsRateLimitOrAbuseStatus(403)
+        || !AppUpdateService.IsRateLimitOrAbuseStatus(429)
+        || AppUpdateService.IsRateLimitOrAbuseStatus(200))
+        Fail("IsRateLimitOrAbuseStatus 逻辑错误");
+    else
+        Ok("IsRateLimitOrAbuseStatus OK");
+
+    // 缓存命中：force=false + 间隔未过 → 应复用，不依赖网络
+    AppUpdateService.ClearCacheForTests();
+    var sampleResult = new AppUpdateService.UpdateCheckResult(
+        true, false, "已是最新（测试缓存）", new Version(1, 5, 0, 41),
+        new Version(1, 5, 0, 41), "v1.5.0.41", null, null, null, null, null);
+    var seedUtc = DateTime.UtcNow;
+    AppUpdateService.SeedCacheForTests(sampleResult, seedUtc);
+    if (!AppUpdateService.ShouldUseCachedResult(
+            force: false,
+            minInterval: TimeSpan.FromMinutes(45),
+            lastCheckUtc: seedUtc,
+            nowUtc: seedUtc.AddMinutes(5),
+            hasCachedResult: true))
+        Fail("5 分钟内 force=false 应命中缓存");
+    else
+        Ok("ShouldUseCachedResult 间隔内命中 OK");
+
+    if (AppUpdateService.ShouldUseCachedResult(
+            force: true,
+            minInterval: TimeSpan.FromMinutes(45),
+            lastCheckUtc: seedUtc,
+            nowUtc: seedUtc.AddMinutes(1),
+            hasCachedResult: true))
+        Fail("force=true 不应跳过网络");
+    else
+        Ok("ShouldUseCachedResult force 跳过网络=否 OK");
+
+    // CheckAsync 走真实缓存路径（force:false，不发起「成功网络」）
+    var cached = AppUpdateService.CheckAsync(
+        minInterval: TimeSpan.FromHours(2),
+        force: false).GetAwaiter().GetResult();
+    if (!cached.Success || cached.Message is null
+        || !cached.Message.Contains("测试缓存", StringComparison.Ordinal))
+        Fail("CheckAsync 应返回 Seed 的缓存结果，实际: " + cached.Message);
+    else
+        Ok("CheckAsync 缓存复用 OK");
+
+    AppUpdateService.ClearCacheForTests();
 }
 
 // ---------- 4) 天气高温/降水 + 经纬度透传 + Open-Meteo JSON ----------

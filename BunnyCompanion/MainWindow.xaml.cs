@@ -286,19 +286,22 @@ public partial class MainWindow : Window
             if (interactive)
                 ShowMessage("正在检查更新…", 2.8);
 
-            // 后台每 5 分钟一轮：强制拉最新；手动也强制
+            // 后台：遵守最小间隔并复用缓存，禁止 force 打穿 GitHub 未认证配额（二次 403 根因）
+            // 手动：可 force，但服务端仍会把 403/429 映射为中文限流文案，并尽量回退上次成功结果
             var check = await AppUpdateService.CheckAsync(
-                minInterval: TimeSpan.Zero,
-                force: true).ConfigureAwait(true);
+                minInterval: interactive
+                    ? AppUpdateService.DefaultInteractiveMinInterval
+                    : AppUpdateService.DefaultBackgroundMinInterval,
+                force: interactive).ConfigureAwait(true);
 
             if (_isExiting || !IsLoaded)
                 return;
 
             if (!check.Success)
             {
-                // 周期后台失败不刷气泡；仅手动检查提示
+                // 周期后台失败不刷气泡；仅手动检查提示（含限流说明）
                 if (interactive)
-                    ShowMessage(check.Message, 5.5);
+                    ShowMessage(check.Message, 6.5);
                 return;
             }
 

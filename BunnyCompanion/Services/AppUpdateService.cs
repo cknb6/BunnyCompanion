@@ -13,6 +13,7 @@ namespace BunnyCompanion.Services;
 /// 从 GitHub Releases 检查 / 下载更新，并以 checksums.txt 中的 SHA256 校验防篡改。
 /// 仅允许官方仓库资源；校验失败绝不替换本机 EXE。
 /// 单文件 EXE 无法原地热替换代码，采用「后台下载校验 → 退出后脚本替换并重启」。
+/// 未认证 API 约 60 次/小时/IP：后台检查有最小间隔与缓存，403/429 不抹掉上次成功结果。
 /// </summary>
 public static class AppUpdateService
 {
@@ -21,10 +22,18 @@ public static class AppUpdateService
     public const string ReleasesApiLatest = "https://api.github.com/repos/cknb6/BunnyCompanion/releases/latest";
     public const string ReleasesPage = "https://github.com/cknb6/BunnyCompanion/releases/latest";
 
+    /// <summary>后台自动检查默认最小间隔（避免 5 分钟 force 打穿未认证配额）。</summary>
+    public static readonly TimeSpan DefaultBackgroundMinInterval = TimeSpan.FromMinutes(45);
+
+    /// <summary>手动检查即使 force，也建议的冷却（仅用于 UI 侧可选）。</summary>
+    public static readonly TimeSpan DefaultInteractiveMinInterval = TimeSpan.FromSeconds(20);
+
     private static readonly HttpClient Http = CreateClient();
     private static readonly object Gate = new();
     private static DateTime _lastCheckUtc = DateTime.MinValue;
     private static UpdateCheckResult? _lastResult;
+    /// <summary>最近一次「成功」的检查结果；限流时优先回退，避免二次全是 403。</summary>
+    private static UpdateCheckResult? _lastSuccessResult;
 
     public sealed record ReleaseAsset(string Name, string BrowserDownloadUrl, long Size);
 
@@ -46,9 +55,110 @@ public static class AppUpdateService
     private static HttpClient CreateClient()
     {
         var c = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
-        c.DefaultRequestHeaders.UserAgent.ParseAdd("XiaoShenCompanion-Updater/1.4");
+        // GitHub 要求可识别 User-Agent；匿名 API 严格限流
+        c.DefaultRequestHeaders.UserAgent.ParseAdd("XiaoShenCompanion-Updater/1.5 (+https://github.com/cknb6/BunnyCompanion)");
         c.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+        c.DefaultRequestHeaders.TryAddWithoutValidation("X-GitHub-Api-Version", "2022-11-28");
         return c;
+    }
+
+    /// <summary>
+    /// 是否应跳过网络、直接复用缓存（纯逻辑，可单测）。
+    /// force=true 时永不跳过；有缓存且未过 minInterval 时跳过。
+    /// </summary>
+    public static bool ShouldUseCachedResult(
+        bool force,
+        TimeSpan? minInterval,
+        DateTime lastCheckUtc,
+        DateTime nowUtc,
+        bool hasCachedResult)
+    {
+        if (force || !hasCachedResult || minInterval is null)
+            return false;
+        var gap = minInterval.Value;
+        if (gap <= TimeSpan.Zero)
+            return false;
+        return nowUtc - lastCheckUtc < gap;
+    }
+
+    /// <summary>是否为限流/滥用类状态码（含部分 403）。</summary>
+    public static bool IsRateLimitOrAbuseStatus(int statusCode) =>
+        statusCode is 403 or 429 or 408;
+
+    /// <summary>
+    /// 将 GitHub HTTP 错误映射为中文用户文案（禁止只显示裸 HTTP 403）。
+    /// </summary>
+    public static string FormatGitHubHttpError(
+        int statusCode,
+        string? responseBodySnippet = null,
+        string? retryAfterHeader = null)
+    {
+        var body = (responseBodySnippet ?? "").Trim();
+        var looksRate =
+            IsRateLimitOrAbuseStatus(statusCode)
+            || body.Contains("rate limit", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("secondary rate", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("abuse detection", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("API rate limit exceeded", StringComparison.OrdinalIgnoreCase);
+
+        if (looksRate || statusCode is 403 or 429)
+        {
+            var wait = "";
+            if (!string.IsNullOrWhiteSpace(retryAfterHeader)
+                && int.TryParse(retryAfterHeader.Trim(), out var sec)
+                && sec > 0)
+            {
+                wait = sec >= 60
+                    ? $" 建议约 {Math.Max(1, (sec + 59) / 60)} 分钟后再试。"
+                    : $" 建议约 {sec} 秒后再试。";
+            }
+
+            return
+                "检查更新暂时受限（GitHub 访问频率限制）。" + wait +
+                "未登录接口每小时次数有限，同一网络多人共用更容易触发。" +
+                "请稍后再试；也可打开 Releases 页手动下载：\n" +
+                ReleasesPage;
+        }
+
+        if (statusCode is >= 500 and <= 599)
+            return $"GitHub 服务暂时不可用（HTTP {statusCode}）。请稍后再试，或手动打开：\n{ReleasesPage}";
+
+        if (statusCode == 404)
+            return "未找到最新 Release（HTTP 404）。请确认仓库发布页是否正常。";
+
+        return
+            $"检查更新失败：网络或接口异常（HTTP {statusCode}）。" +
+            $"可稍后重试，或打开：\n{ReleasesPage}";
+    }
+
+    /// <summary>测试用：注入缓存状态（不发起网络）。</summary>
+    public static void SeedCacheForTests(UpdateCheckResult result, DateTime? checkUtc = null)
+    {
+        lock (Gate)
+        {
+            _lastResult = result;
+            _lastCheckUtc = checkUtc ?? DateTime.UtcNow;
+            if (result.Success)
+                _lastSuccessResult = result;
+        }
+    }
+
+    /// <summary>测试用：清空进程内缓存。</summary>
+    public static void ClearCacheForTests()
+    {
+        lock (Gate)
+        {
+            _lastResult = null;
+            _lastSuccessResult = null;
+            _lastCheckUtc = DateTime.MinValue;
+        }
+    }
+
+    /// <summary>测试/诊断：是否已有任意缓存结果。</summary>
+    public static bool HasCachedResultForTests()
+    {
+        lock (Gate)
+            return _lastResult is not null;
     }
 
     /// <summary>当前运行中的本机版本（优先 FileVersion 含 CI 补丁号；辅以本机记录）。</summary>
@@ -153,6 +263,7 @@ public static class AppUpdateService
 
     /// <summary>
     /// 检查最新 Release。minInterval 内复用缓存，避免频繁打 GitHub。
+    /// force=true 时强制联网；若遇 403/429 限流，尽量回退上次成功结果。
     /// </summary>
     public static async Task<UpdateCheckResult> CheckAsync(
         TimeSpan? minInterval = null,
@@ -160,16 +271,19 @@ public static class AppUpdateService
         CancellationToken ct = default)
     {
         var local = GetLocalVersion();
+        var now = DateTime.UtcNow;
+        UpdateCheckResult? cached;
+        DateTime lastUtc;
+        UpdateCheckResult? lastOk;
         lock (Gate)
         {
-            if (!force
-                && _lastResult is not null
-                && minInterval is { } gap
-                && DateTime.UtcNow - _lastCheckUtc < gap)
-            {
-                return _lastResult;
-            }
+            cached = _lastResult;
+            lastUtc = _lastCheckUtc;
+            lastOk = _lastSuccessResult;
         }
+
+        if (ShouldUseCachedResult(force, minInterval, lastUtc, now, cached is not null) && cached is not null)
+            return cached;
 
         try
         {
@@ -178,9 +292,12 @@ public static class AppUpdateService
             var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
             {
-                return Cache(new UpdateCheckResult(
-                    false, false, $"检查更新失败：HTTP {(int)resp.StatusCode}", local, null,
-                    null, null, null, null, null, null));
+                var code = (int)resp.StatusCode;
+                string? retryAfter = null;
+                if (resp.Headers.TryGetValues("Retry-After", out var vals))
+                    retryAfter = vals.FirstOrDefault();
+                var errMsg = FormatGitHubHttpError(code, body.Length > 400 ? body[..400] : body, retryAfter);
+                return ResolveHttpFailure(local, errMsg, code, lastOk);
             }
 
             using var doc = JsonDocument.Parse(body);
@@ -188,7 +305,7 @@ public static class AppUpdateService
             var tag = root.TryGetProperty("tag_name", out var tagEl) ? tagEl.GetString() ?? "" : "";
             if (!TryParseVersion(tag, out var remote))
             {
-                return Cache(new UpdateCheckResult(
+                return CacheFailure(new UpdateCheckResult(
                     false, false, $"无法解析远端版本标签：{tag}", local, null,
                     tag, null, null, null, null, null));
             }
@@ -216,14 +333,14 @@ public static class AppUpdateService
 
             if (string.IsNullOrWhiteSpace(exeUrl))
             {
-                return Cache(new UpdateCheckResult(
+                return CacheSuccess(new UpdateCheckResult(
                     true, false, $"最新版 {tag} 没有本机架构安装包（{fileName}）", local, remote,
                     tag, notes, null, sumUrl, null, fileName));
             }
 
             if (string.IsNullOrWhiteSpace(sumUrl))
             {
-                return Cache(new UpdateCheckResult(
+                return CacheFailure(new UpdateCheckResult(
                     false, false, "最新版缺少 checksums.txt，拒绝更新（无法校验哈希）", local, remote,
                     tag, notes, exeUrl, null, null, fileName));
             }
@@ -237,14 +354,22 @@ public static class AppUpdateService
             }
             catch (Exception ex)
             {
-                return Cache(new UpdateCheckResult(
-                    false, false, "读取校验文件失败：" + ex.Message, local, remote,
+                // 下载 checksums 也可能 403
+                var msg = ex.Message.Contains("限流", StringComparison.Ordinal)
+                          || ex.Message.Contains("403", StringComparison.Ordinal)
+                          || ex.Message.Contains("429", StringComparison.Ordinal)
+                    ? ex.Message
+                    : "读取校验文件失败：" + ex.Message;
+                if (IsRateLimitMessage(msg) && lastOk is { Success: true })
+                    return WithCacheNote(lastOk, msg);
+                return CacheFailure(new UpdateCheckResult(
+                    false, false, msg, local, remote,
                     tag, notes, exeUrl, sumUrl, null, fileName));
             }
 
             if (string.IsNullOrWhiteSpace(expectedHash))
             {
-                return Cache(new UpdateCheckResult(
+                return CacheFailure(new UpdateCheckResult(
                     false, false, $"checksums.txt 中找不到 {fileName} 的 SHA256，拒绝更新", local, remote,
                     tag, notes, exeUrl, sumUrl, null, fileName));
             }
@@ -269,12 +394,12 @@ public static class AppUpdateService
                 }
             }
 
-            var msg = newer
+            var okMsg = newer
                 ? $"发现新版本 {FormatVersion(remote)}（当前 {FormatVersion(local)}）"
                 : $"已是最新（{FormatVersion(local)}）";
 
-            return Cache(new UpdateCheckResult(
-                true, newer, msg, local, remote, tag, notes, exeUrl, sumUrl, expectedHash, fileName));
+            return CacheSuccess(new UpdateCheckResult(
+                true, newer, okMsg, local, remote, tag, notes, exeUrl, sumUrl, expectedHash, fileName));
         }
         catch (OperationCanceledException)
         {
@@ -282,10 +407,54 @@ public static class AppUpdateService
         }
         catch (Exception ex)
         {
-            return Cache(new UpdateCheckResult(
-                false, false, "检查更新失败：" + ex.Message, local, null,
+            var msg = IsRateLimitMessage(ex.Message)
+                ? ex.Message
+                : "检查更新失败：" + ex.Message;
+            if (IsRateLimitMessage(msg) && lastOk is { Success: true })
+                return WithCacheNote(lastOk, msg);
+            return CacheFailure(new UpdateCheckResult(
+                false, false, msg, local, null,
                 null, null, null, null, null, null));
         }
+    }
+
+    private static bool IsRateLimitMessage(string? msg) =>
+        !string.IsNullOrEmpty(msg)
+        && (msg.Contains("频率限制", StringComparison.Ordinal)
+            || msg.Contains("限流", StringComparison.Ordinal)
+            || msg.Contains("rate limit", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("稍后再试", StringComparison.Ordinal));
+
+    /// <summary>限流时：有上次成功则带回退说明，不抹掉成功缓存。</summary>
+    private static UpdateCheckResult ResolveHttpFailure(
+        Version local, string errMsg, int statusCode, UpdateCheckResult? lastOk)
+    {
+        if (IsRateLimitOrAbuseStatus(statusCode) && lastOk is { Success: true })
+            return WithCacheNote(lastOk, errMsg);
+
+        return CacheFailure(new UpdateCheckResult(
+            false, false, errMsg, local, null,
+            null, null, null, null, null, null));
+    }
+
+    private static UpdateCheckResult WithCacheNote(UpdateCheckResult lastOk, string rateLimitMsg)
+    {
+        // 不更新 _lastCheckUtc 为「成功」，但刷新展示用结果，避免 force 路径反复打穿
+        var note =
+            lastOk.Message +
+            "\n（本次联网受限，已沿用刚才的检查结果。" +
+            rateLimitMsg.Replace("\n", " ", StringComparison.Ordinal).Trim() + "）";
+        // 截断过长
+        if (note.Length > 500)
+            note = note[..500] + "…";
+        var wrapped = lastOk with { Message = note };
+        lock (Gate)
+        {
+            // 保留成功缓存时间戳，拉长冷却；仅更新展示
+            _lastResult = wrapped;
+        }
+
+        return wrapped;
     }
 
     /// <summary>
@@ -499,7 +668,20 @@ public static class AppUpdateService
     private static string PsQuote(string path) =>
         "'" + path.Replace("'", "''", StringComparison.Ordinal) + "'";
 
-    private static UpdateCheckResult Cache(UpdateCheckResult r)
+    private static UpdateCheckResult CacheSuccess(UpdateCheckResult r)
+    {
+        lock (Gate)
+        {
+            _lastCheckUtc = DateTime.UtcNow;
+            _lastResult = r;
+            _lastSuccessResult = r;
+        }
+
+        return r;
+    }
+
+    /// <summary>失败缓存：不覆盖 _lastSuccessResult，避免限流后全是失败。</summary>
+    private static UpdateCheckResult CacheFailure(UpdateCheckResult r)
     {
         lock (Gate)
         {
@@ -667,8 +849,17 @@ public static class AppUpdateService
             throw new InvalidOperationException("不允许的下载地址");
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
-        resp.EnsureSuccessStatusCode();
-        return await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        if (!resp.IsSuccessStatusCode)
+        {
+            string? retry = null;
+            if (resp.Headers.TryGetValues("Retry-After", out var vals))
+                retry = vals.FirstOrDefault();
+            throw new InvalidOperationException(
+                FormatGitHubHttpError((int)resp.StatusCode, body.Length > 300 ? body[..300] : body, retry));
+        }
+
+        return body;
     }
 
     private static async Task DownloadFileAsync(
@@ -679,7 +870,23 @@ public static class AppUpdateService
 
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         using var resp = await Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-        resp.EnsureSuccessStatusCode();
+        if (!resp.IsSuccessStatusCode)
+        {
+            string? retry = null;
+            if (resp.Headers.TryGetValues("Retry-After", out var vals))
+                retry = vals.FirstOrDefault();
+            var snippet = "";
+            try
+            {
+                snippet = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                if (snippet.Length > 300)
+                    snippet = snippet[..300];
+            }
+            catch { /* ignore */ }
+
+            throw new InvalidOperationException(
+                FormatGitHubHttpError((int)resp.StatusCode, snippet, retry));
+        }
         var total = resp.Content.Headers.ContentLength ?? -1;
         await using var input = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         await using var output = new FileStream(destPath, FileMode.Create, FileAccess.Write, FileShare.None, 128 * 1024, true);
