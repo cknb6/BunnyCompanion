@@ -23,7 +23,16 @@ public static class WindowsAgentToolkit
 
     static WindowsAgentToolkit()
     {
-        Http.DefaultRequestHeaders.UserAgent.ParseAdd("XiaoShenCompanion-Agent/1.2");
+        Http.DefaultRequestHeaders.UserAgent.ParseAdd("XiaoShenCompanion-Agent/1.4");
+        try
+        {
+            // 国内定位接口（太平洋电脑网）返回 GBK
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        }
+        catch
+        {
+            // ignore
+        }
     }
 
     public static bool IsRunningAsAdmin()
@@ -45,11 +54,12 @@ public static class WindowsAgentToolkit
     [
         Tool("get_system_info", "获取本机系统信息：计算机名、用户、OS、是否管理员、CPU/内存概况、时间时区。", new JsonObject()),
         Tool("get_location",
-            "根据公网 IP 与本机网络信息推断当前位置（城市/地区/运营商/IP）。用户问「我在哪」「定位」时必须调用。",
+            "推断当前位置（优先国内 IP 定位接口，降低 VPN/境外出口误报）。返回城市/地区/运营商/IP 与是否可能 VPN。" +
+            "用户问「我在哪」「定位」时必须调用。",
             new JsonObject()),
         Tool("get_weather",
-            "查询实时天气与高温/降水等预警。可指定 city；不指定则 IP 定位。用户问天气/预警/带伞时必须调用。",
-            Props(("city", "string", "城市名，如 北京、上海、深圳；可空则自动定位"))),
+            "查询实时天气与高温/降水等预警。可指定 city；不指定则优先用国内 IP 定位城市再查天气。",
+            Props(("city", "string", "城市名，如 北京、上海、深圳；可空则自动定位（偏中国网络）"))),
         Tool("memo_add",
             "添加备忘/提醒。text 为事项；due 可选本地时间（如 2026-07-16 15:30 或 30分钟后/明天9点 口语会由上层解析，工具侧优先 ISO）。",
             Props(
@@ -404,6 +414,19 @@ public static class WindowsAgentToolkit
         return sb.ToString().Trim();
     }
 
+    /// <summary>公网定位结果（偏中国网络优先）。</summary>
+    private sealed record GeoHit(
+        string Source,
+        string Ip,
+        string Country,
+        string Province,
+        string City,
+        string District,
+        string Isp,
+        string Lat,
+        string Lon,
+        bool PreferChinaSource);
+
     private static async Task<string> GetLocationAsync(CancellationToken ct)
     {
         var sb = new StringBuilder();
@@ -430,63 +453,215 @@ public static class WindowsAgentToolkit
         }
 
         sb.AppendLine();
-        sb.AppendLine("【公网 IP 定位】");
-        // 多个免费源，提高成功率
-        var sources = new[]
+        sb.AppendLine("【公网定位 · 优先国内接口】");
+        var hit = await ResolvePublicGeoPreferChinaAsync(ct).ConfigureAwait(false);
+        if (hit is null)
         {
-            "http://ip-api.com/json/?lang=zh-CN&fields=status,message,country,regionName,city,district,zip,lat,lon,isp,org,as,query,timezone",
-            "https://ipapi.co/json/",
-        };
-
-        foreach (var url in sources)
-        {
-            try
-            {
-                using var resp = await Http.GetAsync(url, ct).ConfigureAwait(false);
-                var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-                if (!resp.IsSuccessStatusCode) continue;
-
-                using var doc = JsonDocument.Parse(body);
-                var root = doc.RootElement;
-                if (url.Contains("ip-api", StringComparison.Ordinal))
-                {
-                    if (root.TryGetProperty("status", out var st) && st.GetString() == "fail")
-                        continue;
-                    sb.AppendLine($"IP: {G(root, "query")}");
-                    sb.AppendLine($"国家: {G(root, "country")}");
-                    sb.AppendLine($"省/州: {G(root, "regionName")}");
-                    sb.AppendLine($"城市: {G(root, "city")}");
-                    sb.AppendLine($"区: {G(root, "district")}");
-                    sb.AppendLine($"经纬度: {G(root, "lat")}, {G(root, "lon")}");
-                    sb.AppendLine($"ISP: {G(root, "isp")}");
-                    sb.AppendLine($"组织: {G(root, "org")}");
-                    sb.AppendLine($"时区: {G(root, "timezone")}");
-                    sb.AppendLine("说明: 基于公网 IP 的近似位置，精度到城市级；公司出口 IP 可能显示机房/总部城市。");
-                    return sb.ToString().Trim();
-                }
-
-                // ipapi.co
-                sb.AppendLine($"IP: {G(root, "ip")}");
-                sb.AppendLine($"国家: {G(root, "country_name")}");
-                sb.AppendLine($"省/州: {G(root, "region")}");
-                sb.AppendLine($"城市: {G(root, "city")}");
-                sb.AppendLine($"经纬度: {G(root, "latitude")}, {G(root, "longitude")}");
-                sb.AppendLine($"ISP/Org: {G(root, "org")}");
-                sb.AppendLine($"时区: {G(root, "timezone")}");
-                sb.AppendLine("说明: 基于公网 IP 的近似位置。");
-                return sb.ToString().Trim();
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch
-            {
-                // try next
-            }
+            sb.AppendLine("公网定位暂时失败（网络或接口限制）。仍可根据本机网卡与公司网络环境推断。");
+            sb.AppendLine("提示: 若开了 VPN/代理，出口 IP 会显示境外城市，属正常现象。");
+            return sb.ToString().Trim();
         }
 
-        sb.AppendLine("公网定位暂时失败（网络或接口限制）。仍可根据本机网卡与公司网络环境推断。");
+        sb.AppendLine($"定位源: {hit.Source}");
+        sb.AppendLine($"IP: {hit.Ip}");
+        sb.AppendLine($"国家: {hit.Country}");
+        sb.AppendLine($"省/州: {hit.Province}");
+        sb.AppendLine($"城市: {hit.City}");
+        if (!string.IsNullOrWhiteSpace(hit.District))
+            sb.AppendLine($"区: {hit.District}");
+        if (!string.IsNullOrWhiteSpace(hit.Lat) && !string.IsNullOrWhiteSpace(hit.Lon))
+            sb.AppendLine($"经纬度: {hit.Lat}, {hit.Lon}");
+        if (!string.IsNullOrWhiteSpace(hit.Isp))
+            sb.AppendLine($"运营商/ISP: {hit.Isp}");
+
+        sb.AppendLine();
+        sb.AppendLine(BuildGeoDisclaimer(hit));
+        return sb.ToString().Trim();
+    }
+
+    /// <summary>
+    /// 优先国内 IP 库；若多源冲突且存在「中国」结果，优先采用国内源，避免 VPN 境外出口误导。
+    /// </summary>
+    private static async Task<GeoHit?> ResolvePublicGeoPreferChinaAsync(CancellationToken ct)
+    {
+        var hits = new List<GeoHit>();
+
+        // 1) 太平洋电脑网 whois（国内，中文省市区，GBK）
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get,
+                "https://whois.pconline.com.cn/ipJson.jsp?json=true");
+            req.Headers.TryAddWithoutValidation("User-Agent", "XiaoShenCompanion/1.4");
+            using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
+            var bytes = await resp.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
+            if (resp.IsSuccessStatusCode && bytes.Length > 8)
+            {
+                Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+                var body = Encoding.GetEncoding("GBK").GetString(bytes);
+                using var doc = JsonDocument.Parse(body);
+                var root = doc.RootElement;
+                var err = G(root, "err");
+                if (string.IsNullOrWhiteSpace(err))
+                {
+                    var city = G(root, "city");
+                    var pro = G(root, "pro");
+                    hits.Add(new GeoHit(
+                        "国内·太平洋电脑网",
+                        G(root, "ip"),
+                        "中国",
+                        pro,
+                        string.IsNullOrWhiteSpace(city) ? pro : city,
+                        G(root, "region"),
+                        G(root, "addr"),
+                        "",
+                        "",
+                        PreferChinaSource: true));
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch { /* next */ }
+
+        // 2) 纯文本国内：myip.ipip.net
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, "https://myip.ipip.net");
+            req.Headers.TryAddWithoutValidation("User-Agent", "XiaoShenCompanion/1.4");
+            using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
+            var text = (await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false)).Trim();
+            // 例：当前 IP：1.2.3.4  来自于：中国 北京 北京  移动
+            if (resp.IsSuccessStatusCode && text.Contains("IP", StringComparison.OrdinalIgnoreCase))
+            {
+                var ipM = Regex.Match(text, @"(\d{1,3}(?:\.\d{1,3}){3})");
+                var fromM = Regex.Match(text, @"来自于[:：]\s*(.+)");
+                var from = fromM.Success ? fromM.Groups[1].Value.Trim() : text;
+                var parts = from.Split([' ', '\t', '　'], StringSplitOptions.RemoveEmptyEntries);
+                var country = parts.Length > 0 ? parts[0] : "";
+                var province = parts.Length > 1 ? parts[1] : "";
+                var city = parts.Length > 2 ? parts[2] : province;
+                var isp = parts.Length > 3 ? string.Join(" ", parts.Skip(3)) : "";
+                hits.Add(new GeoHit(
+                    "国内·ipip.net",
+                    ipM.Success ? ipM.Groups[1].Value : "",
+                    country,
+                    province,
+                    city,
+                    "",
+                    isp,
+                    "",
+                    "",
+                    PreferChinaSource: true));
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch { /* next */ }
+
+        // 3) ip.sb（国际，作对照；VPN 时往往出境外）
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, "https://api.ip.sb/geoip");
+            req.Headers.TryAddWithoutValidation("User-Agent", "XiaoShenCompanion/1.4");
+            using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
+            var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            if (resp.IsSuccessStatusCode)
+            {
+                using var doc = JsonDocument.Parse(body);
+                var root = doc.RootElement;
+                hits.Add(new GeoHit(
+                    "国际·ip.sb",
+                    G(root, "ip"),
+                    G(root, "country") is { Length: > 0 } c ? c : G(root, "country_code"),
+                    G(root, "region"),
+                    G(root, "city"),
+                    "",
+                    string.IsNullOrWhiteSpace(G(root, "isp")) ? G(root, "organization") : G(root, "isp"),
+                    G(root, "latitude"),
+                    G(root, "longitude"),
+                    PreferChinaSource: false));
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch { /* next */ }
+
+        // 4) ip-api 中文（国际备用）
+        try
+        {
+            var body = await Http.GetStringAsync(
+                "http://ip-api.com/json/?lang=zh-CN&fields=status,message,country,regionName,city,district,lat,lon,isp,org,query,timezone",
+                ct).ConfigureAwait(false);
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+            if (G(root, "status") != "fail")
+            {
+                hits.Add(new GeoHit(
+                    "国际·ip-api",
+                    G(root, "query"),
+                    G(root, "country"),
+                    G(root, "regionName"),
+                    G(root, "city"),
+                    G(root, "district"),
+                    string.IsNullOrWhiteSpace(G(root, "isp")) ? G(root, "org") : G(root, "isp"),
+                    G(root, "lat"),
+                    G(root, "lon"),
+                    PreferChinaSource: false));
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch { /* next */ }
+
+        if (hits.Count == 0)
+            return null;
+
+        // 裁决：有「中国」结果则优先国内源；否则取国内源优先、再国际源
+        static bool IsChina(GeoHit h)
+        {
+            var c = (h.Country ?? "") + h.Province + h.City + h.Isp;
+            return c.Contains("中国", StringComparison.Ordinal)
+                   || c.Contains("China", StringComparison.OrdinalIgnoreCase)
+                   || string.Equals(h.Country, "CN", StringComparison.OrdinalIgnoreCase)
+                   || Regex.IsMatch(c, @"北京|上海|广东|浙江|江苏|四川|湖北|湖南|河南|河北|山东|福建|陕西|重庆|天津|深圳|广州|杭州|成都|武汉|南京|西安|苏州|青岛|大连|厦门|香港|台湾|澳门");
+        }
+
+        var chinaHits = hits.Where(IsChina).ToList();
+        if (chinaHits.Count > 0)
+        {
+            // 国内源优先
+            return chinaHits.FirstOrDefault(h => h.PreferChinaSource) ?? chinaHits[0];
+        }
+
+        // 全是境外：仍返回，但调用方会加 VPN 警告
+        return hits.FirstOrDefault(h => h.PreferChinaSource) ?? hits[0];
+    }
+
+    private static string BuildGeoDisclaimer(GeoHit hit)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("说明: 位置由公网出口 IP 近似推断（城市级），不是 GPS。");
+
+        var blob = $"{hit.Country}{hit.Province}{hit.City}{hit.Isp}{hit.Source}";
+        var looksAbroad = !(blob.Contains("中国", StringComparison.Ordinal)
+                            || blob.Contains("China", StringComparison.OrdinalIgnoreCase)
+                            || Regex.IsMatch(blob, @"北京|上海|广东|浙江|江苏|四川|深圳|广州|杭州|成都"));
+        var looksVpn = Regex.IsMatch(
+            hit.Isp + hit.Source,
+            @"VPN|Proxy|Cloudflare|Amazon|AWS|Google|Azure|DigitalOcean|Linode|Hetzner|Akamai|CDN|数据中心|机房",
+            RegexOptions.IgnoreCase);
+
+        if (looksAbroad || looksVpn)
+        {
+            sb.AppendLine("⚠️ 注意: 当前出口 IP 更像境外/云厂商/代理（常见于开了 VPN、公司跨境专线、加速器）。");
+            sb.AppendLine("若你实际在国内，请先关闭 VPN/代理后再查「我在哪」；或直接说城市名查天气，例如「上海天气」。");
+        }
+        else if (!hit.PreferChinaSource)
+        {
+            sb.AppendLine("本次使用了国际 IP 库；若结果与你所在城市不符，可关闭 VPN 后重试。");
+        }
+        else
+        {
+            sb.AppendLine("本次优先使用了国内 IP 定位接口，更贴近中国运营商出口。");
+        }
+
+        sb.AppendLine("公司统一出口可能显示总部/机房城市，不等于你人在那栋楼。");
         return sb.ToString().Trim();
     }
 
@@ -497,31 +672,26 @@ public static class WindowsAgentToolkit
 
         if (city is null)
         {
-            try
+            // 与 get_location 同一套「国内优先」规则，避免 VPN 把天气查到境外
+            var hit = await ResolvePublicGeoPreferChinaAsync(ct).ConfigureAwait(false);
+            if (hit is not null)
             {
-                var locJson = await Http.GetStringAsync(
-                    "http://ip-api.com/json/?lang=zh-CN&fields=status,city,lat,lon,regionName,country,district,query", ct)
-                    .ConfigureAwait(false);
-                using var doc = JsonDocument.Parse(locJson);
-                var root = doc.RootElement;
-                if (G(root, "status") != "fail")
+                place = string.Join(" ", new[] { hit.Country, hit.Province, hit.City, hit.District }
+                    .Where(s => !string.IsNullOrWhiteSpace(s)));
+                lat = hit.Lat;
+                lon = hit.Lon;
+                city = !string.IsNullOrWhiteSpace(hit.City) ? hit.City : hit.Province;
+                // 境外 VPN 结果不要拿去查天气，改为让用户说城市
+                var abroad = BuildGeoDisclaimer(hit).Contains("境外", StringComparison.Ordinal)
+                             || BuildGeoDisclaimer(hit).Contains("VPN", StringComparison.Ordinal);
+                if (abroad && !string.IsNullOrWhiteSpace(hit.Country)
+                    && !hit.Country.Contains("中国", StringComparison.Ordinal)
+                    && !hit.Country.Contains("China", StringComparison.OrdinalIgnoreCase))
                 {
-                    place = string.Join(" ", new[]
-                    {
-                        G(root, "country"), G(root, "regionName"), G(root, "city"), G(root, "district"),
-                    }.Where(s => !string.IsNullOrWhiteSpace(s)));
-                    lat = G(root, "lat");
-                    lon = G(root, "lon");
-                    city = G(root, "city");
+                    return "当前公网出口更像 VPN/境外 IP，自动定位不可靠。\n" +
+                           "请直接说城市查天气，例如：「北京天气」「上海今天热不热」。\n\n" +
+                           BuildGeoDisclaimer(hit);
                 }
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch
-            {
-                // fall through
             }
         }
 
@@ -531,13 +701,22 @@ public static class WindowsAgentToolkit
             var q = !string.IsNullOrWhiteSpace(lat) && !string.IsNullOrWhiteSpace(lon)
                 ? $"{lat},{lon}"
                 : (city ?? "Beijing");
+            // 中文城市名对 wttr 更友好
+            if (q.Contains("市", StringComparison.Ordinal) && q.EndsWith("市", StringComparison.Ordinal))
+                q = q.TrimEnd('市');
             var url = $"https://wttr.in/{Uri.EscapeDataString(q)}?format=j1&lang=zh";
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
             req.Headers.TryAddWithoutValidation("Accept-Language", "zh-CN");
+            req.Headers.TryAddWithoutValidation("User-Agent", "XiaoShenCompanion/1.4");
             using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
             var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             if (resp.IsSuccessStatusCode)
-                return WeatherReport.FormatWeatherBroadcast(body, place);
+            {
+                var report = WeatherReport.FormatWeatherBroadcast(body, place);
+                if (city is null)
+                    report += "\n\n（定位规则: 优先国内 IP 库；开 VPN 时请直接说城市名。）";
+                return report;
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

@@ -43,8 +43,8 @@ internal static class AgentSystemPrompt
             当用户意图涉及真实世界/本机时，**必须先调用工具，再根据工具结果用可爱语气总结**，禁止臆造：
             | 用户意图 | 必用工具 |
             |---|---|
-            | 我在哪 / 定位 / 这是哪 | get_location |
-            | 天气 / 冷不冷 / 要不要带伞 / 高温降水预警 | get_weather（可先定位） |
+            | 我在哪 / 定位 / 这是哪 | get_location（优先国内 IP 库；若提示 VPN/境外，请让用户关 VPN 或直接说城市） |
+            | 天气 / 冷不冷 / 要不要带伞 / 高温降水预警 | get_weather（可先定位；VPN 时请用户报城市名） |
             | 提醒我 / 备忘 / 待办 | memo_add / memo_list / memo_done |
             | 星座 / 运势 / 生日分析 | zodiac_analyze |
             | 今日卡片 / 穿搭心情 | daily_card |
