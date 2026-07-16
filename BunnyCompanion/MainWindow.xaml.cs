@@ -45,6 +45,9 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _systemTriggerTimer = new() { Interval = TimeSpan.FromSeconds(15) };
     /// <summary>定期自愈：穿透残留 / 拖拽卡死 / 透明度动画卡住导致点不上。</summary>
     private readonly DispatcherTimer _inputHealTimer = new() { Interval = TimeSpan.FromSeconds(1.2) };
+    /// <summary>后台自动更新：默认每 5 分钟检测一次，有新版本则下载校验并覆盖 EXE。</summary>
+    private DispatcherTimer? _autoUpdateTimer;
+    private bool _updateCheckRunning;
 
     private PetSettings _settings;
     private PetActionDefinition _currentAction = PetActionCatalog.Get("idle");
@@ -210,16 +213,22 @@ public partial class MainWindow : Window
         }));
     }
 
-    /// <summary>启动约 12 秒后静默检查 GitHub 更新（需开启 AutoCheckUpdate）。</summary>
+    /// <summary>
+    /// 自动更新调度：启动约 15 秒后首次检测，之后每 5 分钟后台检测。
+    /// 发现新版本 → 下载 → SHA256 校验 → 退出并覆盖当前 EXE 重启。
+    /// </summary>
     private void ScheduleAutoUpdateCheck()
     {
-        if (!_settings.AutoCheckUpdate)
+        _autoUpdateTimer?.Stop();
+        _autoUpdateTimer = null;
+        if (!_settings.AutoCheckUpdate || _isExiting)
             return;
-        var t = new DispatcherTimer { Interval = TimeSpan.FromSeconds(12) };
-        t.Tick += async (_, _) =>
+
+        // 周期定时器：每 5 分钟
+        _autoUpdateTimer = new DispatcherTimer { Interval = TimeSpan.FromMinutes(5) };
+        _autoUpdateTimer.Tick += async (_, _) =>
         {
-            t.Stop();
-            if (_isExiting)
+            if (_isExiting || !_settings.AutoCheckUpdate)
                 return;
             try
             {
@@ -227,89 +236,132 @@ public partial class MainWindow : Window
             }
             catch
             {
-                // 静默失败
+                // 静默失败，等下一轮
             }
         };
-        t.Start();
+
+        // 首次延迟 15 秒，不挡开场；之后启动 5 分钟周期
+        var first = new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
+        first.Tick += async (_, _) =>
+        {
+            first.Stop();
+            if (_isExiting || !_settings.AutoCheckUpdate)
+                return;
+            try
+            {
+                await CheckForUpdatesAsync(interactive: false).ConfigureAwait(true);
+            }
+            catch
+            {
+                // ignore
+            }
+
+            if (!_isExiting && _settings.AutoCheckUpdate && _autoUpdateTimer is not null)
+                _autoUpdateTimer.Start();
+        };
+        first.Start();
+    }
+
+    /// <summary>设置里开关「自动检查更新」时调用，立即重排调度。</summary>
+    public void RefreshAutoUpdateSchedule()
+    {
+        ScheduleAutoUpdateCheck();
     }
 
     private async Task CheckForUpdatesAsync(bool interactive)
     {
         if (_isExiting)
             return;
-
-        if (interactive)
-            ShowMessage("正在检查更新…", 2.8);
-
-        var check = await AppUpdateService.CheckAsync(
-            minInterval: interactive ? TimeSpan.Zero : TimeSpan.FromHours(4),
-            force: interactive).ConfigureAwait(true);
-
-        if (_isExiting || !IsLoaded)
-            return;
-
-        if (!check.Success)
-        {
-            // 静默检查失败也给一次轻提示，避免「完全没反应」
-            ShowMessage(interactive ? check.Message : "检查更新暂不可用（网络/GitHub）", interactive ? 5.5 : 3.5);
-            return;
-        }
-
-        if (!check.UpdateAvailable)
+        // 防止 5 分钟轮询与手动检查、下载重叠
+        if (_updateCheckRunning)
         {
             if (interactive)
-                ShowMessage(check.Message + $"\n当前 {AppUpdateService.FormatVersion(check.LocalVersion)}", 4);
+                ShowMessage("正在检查或更新中，请稍候…", 2.5);
             return;
         }
 
-        var remote = check.RemoteVersion is null
-            ? check.TagName ?? "?"
-            : AppUpdateService.FormatVersion(check.RemoteVersion);
-
-        // 自动热更新：下载校验通过后覆盖当前 EXE 并重启（交互检查也可选立刻更新）
-        if (interactive)
+        _updateCheckRunning = true;
+        try
         {
-            var ask = MessageBox.Show(
-                this,
-                $"{check.Message}\n\n" +
-                $"来源：GitHub {AppUpdateService.Owner}/{AppUpdateService.Repo}\n" +
-                $"文件：{check.TargetFileName}\n" +
-                $"SHA256：{check.ExpectedSha256}\n\n" +
-                "将自动下载并用 checksums.txt 校验；通过后覆盖当前程序并重启。\n\n" +
-                "现在更新吗？",
-                $"发现新版本 {remote}",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Question);
-            if (ask != MessageBoxResult.Yes)
+            if (interactive)
+                ShowMessage("正在检查更新…", 2.8);
+
+            // 后台每 5 分钟一轮：强制拉最新；手动也强制
+            var check = await AppUpdateService.CheckAsync(
+                minInterval: TimeSpan.Zero,
+                force: true).ConfigureAwait(true);
+
+            if (_isExiting || !IsLoaded)
                 return;
-        }
-        else
-        {
-            ShowMessage($"发现新版本 {remote}，正在后台热更新…", 4);
-        }
 
-        var progress = new Progress<string>(msg =>
-        {
-            if (!_isExiting && IsLoaded)
-                ShowMessage(msg, 3);
-        });
+            if (!check.Success)
+            {
+                // 周期后台失败不刷气泡；仅手动检查提示
+                if (interactive)
+                    ShowMessage(check.Message, 5.5);
+                return;
+            }
 
-        var apply = await AppUpdateService.DownloadVerifyAndScheduleReplaceAsync(check, progress)
-            .ConfigureAwait(true);
+            if (!check.UpdateAvailable)
+            {
+                if (interactive)
+                    ShowMessage(check.Message + $"\n当前 {AppUpdateService.FormatVersion(check.LocalVersion)}", 4);
+                return;
+            }
 
-        if (!apply.Success)
-        {
+            var remote = check.RemoteVersion is null
+                ? check.TagName ?? "?"
+                : AppUpdateService.FormatVersion(check.RemoteVersion);
+
+            // 手动：确认后更新；后台自动：直接下载覆盖（热更新）
             if (interactive)
-                MessageBox.Show(this, apply.Message, "更新失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+            {
+                var ask = MessageBox.Show(
+                    this,
+                    $"{check.Message}\n\n" +
+                    $"来源：GitHub {AppUpdateService.Owner}/{AppUpdateService.Repo}\n" +
+                    $"文件：{check.TargetFileName}\n" +
+                    $"SHA256：{check.ExpectedSha256}\n\n" +
+                    "将自动下载并用 checksums.txt 校验；通过后覆盖当前程序并重启。\n\n" +
+                    "现在更新吗？",
+                    $"发现新版本 {remote}",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Question);
+                if (ask != MessageBoxResult.Yes)
+                    return;
+            }
             else
-                ShowMessage(apply.Message, 5);
-            return;
-        }
+            {
+                ShowMessage($"发现新版本 {remote}，正在后台下载并自动覆盖…", 4.5);
+            }
 
-        ShowMessage("校验通过，即将覆盖并重启…", 2.2);
-        await Task.Delay(500).ConfigureAwait(true);
-        // 退出后 bat/ps1 覆盖当前 EXE 并拉起新版本
-        ExitApplication();
+            var progress = new Progress<string>(msg =>
+            {
+                if (!_isExiting && IsLoaded)
+                    ShowMessage(msg, 3);
+            });
+
+            var apply = await AppUpdateService.DownloadVerifyAndScheduleReplaceAsync(check, progress)
+                .ConfigureAwait(true);
+
+            if (!apply.Success)
+            {
+                if (interactive)
+                    MessageBox.Show(this, apply.Message, "更新失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+                else
+                    ShowMessage("自动更新失败：" + apply.Message, 5);
+                return;
+            }
+
+            ShowMessage("校验通过，即将覆盖并重启…", 2.2);
+            await Task.Delay(500).ConfigureAwait(true);
+            // 退出后 bat/ps1 覆盖当前 EXE 并拉起新版本
+            ExitApplication();
+        }
+        finally
+        {
+            _updateCheckRunning = false;
+        }
     }
 
     /// <summary>
@@ -2148,6 +2200,8 @@ public partial class MainWindow : Window
             ApplySettings();
             SaveSettings();
             UpdateTrayChecks();
+            // 自动更新开关变化时重排 5 分钟周期
+            RefreshAutoUpdateSchedule();
             ShowMessage("设置已经记住啦。", 3);
             PlayAction("clap", exclusiveSeconds: 2);
         }
@@ -2299,6 +2353,8 @@ public partial class MainWindow : Window
         _focusTimer.Stop();
         _inputHealTimer.Stop();
         _systemTriggerTimer.Stop();
+        _autoUpdateTimer?.Stop();
+        _autoUpdateTimer = null;
         if (_isDragging)
             EndDrag(interrupted: true);
         try
