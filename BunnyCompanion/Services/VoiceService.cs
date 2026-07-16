@@ -135,10 +135,21 @@ public static class VoiceService
         {
             if (string.IsNullOrWhiteSpace(id))
                 return;
-            if (id.Contains("nan", StringComparison.OrdinalIgnoreCase)
-                || id.Contains("male", StringComparison.OrdinalIgnoreCase)
-                || id.Contains("cixing", StringComparison.OrdinalIgnoreCase))
+            // 注意：Contains("male") 会误伤 "female"，必须先排除女声词
+            var lower = id.ToLowerInvariant();
+            if (lower.Contains("female", StringComparison.Ordinal)
+                || lower.Contains("nvsheng", StringComparison.Ordinal)
+                || lower.Contains("jiejie", StringComparison.Ordinal))
+            {
+                // 明确女声 id，放行
+            }
+            else if (lower.Contains("nan", StringComparison.Ordinal)
+                     || lower.Contains("male", StringComparison.Ordinal)
+                     || lower.Contains("cixing", StringComparison.Ordinal))
+            {
                 return;
+            }
+
             if (!voices.Contains(id, StringComparer.OrdinalIgnoreCase))
                 voices.Add(id);
         }

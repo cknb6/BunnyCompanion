@@ -327,7 +327,7 @@ void Fail(string msg)
         Ok("URL 拒绝第三方域名 OK");
 }
 
-// ---------- 4) 天气高温/降水 ----------
+// ---------- 4) 天气高温/降水 + 经纬度透传 + Open-Meteo JSON ----------
 {
     var hot = WeatherReport.BuildWeatherAlerts(38, 40, 39, 0, 0, 10, "晴");
     if (!hot.Any(a => a.Contains("高温", StringComparison.Ordinal))) Fail("38°C 应有高温警示");
@@ -340,21 +340,76 @@ void Fail(string msg)
     var sampleJson = """
         {
           "current_condition":[{"temp_C":"36","FeelsLikeC":"38","humidity":"55","windspeedKmph":"12","precipMM":"0.2","weatherDesc":[{"value":"Sunny"}],"lang_zh":[{"value":"晴"}]}],
-          "nearest_area":[{"areaName":[{"value":"TestCity"}],"region":[{"value":"TestRegion"}],"country":[{"value":"China"}]}],
+          "nearest_area":[{"areaName":[{"value":"TestCity"}],"region":[{"value":"TestRegion"}],"country":[{"value":"China"}],"latitude":"31.230","longitude":"121.474"}],
           "weather":[{"maxtempC":"37","mintempC":"28","hourly":[
             {"time":"900","tempC":"32","precipMM":"0","chanceofrain":"10","weatherDesc":[{"value":"Sunny"}],"lang_zh":[{"value":"晴"}]},
             {"time":"1500","tempC":"37","precipMM":"2","chanceofrain":"55","weatherDesc":[{"value":"Rain"}],"lang_zh":[{"value":"小雨"}]}
           ]}]
         }
         """;
-    var broadcast = WeatherReport.FormatWeatherBroadcast(sampleJson, "测试省 测试市");
+    var broadcast = WeatherReport.FormatWeatherBroadcast(sampleJson, "测试省 测试市", 31.23, 121.47, "单元测试传入坐标");
     if (!broadcast.Contains("°C", StringComparison.Ordinal)) Fail("播报缺气温");
     if (!broadcast.Contains("【提醒与预警】", StringComparison.Ordinal)) Fail("播报缺预警节");
+    if (!broadcast.Contains("【关心提醒】", StringComparison.Ordinal)) Fail("播报缺关心提醒节");
+    if (!broadcast.Contains("纬度(Latitude)", StringComparison.Ordinal)) Fail("播报缺纬度字段");
+    if (!broadcast.Contains("经度(Longitude)", StringComparison.Ordinal)) Fail("播报缺经度字段");
+    if (!broadcast.Contains("31.23", StringComparison.Ordinal)) Fail("播报应含传入纬度 31.23");
+    if (!broadcast.Contains("121.47", StringComparison.Ordinal)) Fail("播报应含传入经度 121.47");
     if (!broadcast.Contains("高温", StringComparison.Ordinal) && !broadcast.Contains("降水", StringComparison.Ordinal))
         Fail("样例应触发高温或降水提示");
-    else Ok("FormatWeatherBroadcast 含气温与警示节");
+    else Ok("FormatWeatherBroadcast 含气温/经纬度/警示/关心");
 
-    File.WriteAllText(Path.Combine(scratch, "weather.txt"), broadcast + "\n---\nhot=" + string.Join("|", hot) + "\nrain=" + string.Join("|", rain) + "\n");
+    // Open-Meteo 样例：数字型字段 + 根级 lat/lon
+    var omJson = """
+        {
+          "latitude": 31.247803,
+          "longitude": 121.5,
+          "elevation": 3.0,
+          "timezone": "Asia/Shanghai",
+          "current": {
+            "temperature_2m": 39.6,
+            "relative_humidity_2m": 37,
+            "apparent_temperature": 44.6,
+            "precipitation": 0.0,
+            "weather_code": 2,
+            "wind_speed_10m": 11.3
+          },
+          "hourly": {
+            "time": ["2026-07-16T09:00", "2026-07-16T12:00", "2026-07-16T15:00", "2026-07-16T18:00"],
+            "temperature_2m": [36.5, 39.1, 39.2, 36.7],
+            "precipitation_probability": [5, 29, 48, 41],
+            "weather_code": [2, 2, 51, 2],
+            "uv_index": [4.55, 8.30, 3.45, 0.85]
+          },
+          "daily": {
+            "time": ["2026-07-16"],
+            "temperature_2m_max": [39.5],
+            "temperature_2m_min": [31.2],
+            "precipitation_sum": [2.6],
+            "precipitation_probability_max": [49],
+            "uv_index_max": [8.3]
+          }
+        }
+        """;
+    var omSnap = WeatherReport.ParseOpenMeteo(omJson, "中国 上海市 上海", 31.23, 121.47, "测试地理编码");
+    if (omSnap.Latitude is null || omSnap.Longitude is null) Fail("Open-Meteo 快照应有经纬度");
+    if (Math.Abs(omSnap.TempC - 39.6) > 0.01) Fail("Open-Meteo 气温解析错误");
+    if (omSnap.UvIndexMax is null || omSnap.UvIndexMax < 8) Fail("Open-Meteo 应解析到 UV≥8");
+    var omText = WeatherReport.FormatSnapshot(omSnap);
+    if (!omText.Contains("纬度(Latitude)", StringComparison.Ordinal)) Fail("Open-Meteo 播报缺纬度");
+    if (!omText.Contains("经度(Longitude)", StringComparison.Ordinal)) Fail("Open-Meteo 播报缺经度");
+    if (!omText.Contains("【关心提醒】", StringComparison.Ordinal)) Fail("Open-Meteo 播报缺关心提醒");
+    if (!omText.Contains("防晒", StringComparison.Ordinal) && !omText.Contains("高温", StringComparison.Ordinal))
+        Fail("高温+高 UV 应有关心/预警");
+    else Ok("ParseOpenMeteo + FormatSnapshot 经纬度与关心提醒 OK");
+
+    var cares = WeatherReport.BuildCareTips(omSnap);
+    if (cares.Count == 0) Fail("BuildCareTips 不应为空");
+    else Ok("BuildCareTips 条数=" + cares.Count);
+
+    File.WriteAllText(Path.Combine(scratch, "weather.txt"),
+        broadcast + "\n---\n" + omText + "\n---\nhot=" + string.Join("|", hot) +
+        "\nrain=" + string.Join("|", rain) + "\ncares=" + string.Join("|", cares) + "\n");
 }
 
 Console.WriteLine(fails == 0 ? "ALL_PASS" : $"FAILURES={fails}");

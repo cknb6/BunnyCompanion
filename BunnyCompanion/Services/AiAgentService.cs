@@ -103,10 +103,27 @@ public sealed class AiAgentService
     {
         var text = (userText ?? string.Empty).Trim();
         var attachList = attachments?.ToList() ?? [];
+
+        // 先剔除过大图片字节：避免正文写「图已附在消息中」而实际 vision 列表为空
+        for (var i = 0; i < attachList.Count; i++)
+        {
+            var a = attachList[i];
+            if (a.Kind != ChatAttachmentKind.Image || a.ImageBytes is not { Length: > 0 } imgBytes)
+                continue;
+            if (imgBytes.Length <= AiConfig.MaxImageBytesSoft)
+                continue;
+            attachList[i] = a with { ImageBytes = null };
+        }
+
         var hasImageAttach = attachList.Any(a => a.Kind == ChatAttachmentKind.Image && a.ImageBytes is { Length: > 0 });
         var hasTextAttach = attachList.Any(a => a.Kind == ChatAttachmentKind.Text && !string.IsNullOrWhiteSpace(a.TextContent));
         var hasPathAttach = attachList.Any(a =>
             a.Kind == ChatAttachmentKind.Other && !string.IsNullOrWhiteSpace(a.FullPath));
+        // 仅有过大图被剔除后：仍可按路径处理
+        var hasPathOnlyImage = attachList.Any(a =>
+            a.Kind == ChatAttachmentKind.Image
+            && (a.ImageBytes is null || a.ImageBytes.Length == 0)
+            && !string.IsNullOrWhiteSpace(a.FullPath));
 
         if (text.Length == 0)
         {
@@ -116,7 +133,7 @@ public sealed class AiAgentService
                 text = "看看我发的图，跟我说你看到了什么。";
             else if (hasTextAttach)
                 text = "看看我发的文件，帮我读一下并说说重点。";
-            else if (hasPathAttach)
+            else if (hasPathAttach || hasPathOnlyImage)
                 text = "我拖了本机文件进来，请按路径用工具查看或处理，并告诉我结果。";
             else
                 text = "在吗";
@@ -147,12 +164,8 @@ public sealed class AiAgentService
             if (images.Count >= AiConfig.MaxImageAttachments)
                 break;
             var bytes = attachment.ImageBytes!;
-            // 超大图再压一轮，避免 Step 多模态超时/拒识
             if (bytes.Length > AiConfig.MaxImageBytesSoft)
-            {
-                // 已在 UI 侧限到 1280；此处仅丢弃极端超大，保接口稳定
                 continue;
-            }
 
             images.Add(new ImageInput(bytes, NormalizeImageMime(attachment.MimeType, bytes)));
         }
@@ -1046,9 +1059,24 @@ public sealed class AiAgentService
         sb.AppendLine(string.IsNullOrWhiteSpace(text) ? "请查看我拖进/发来的附件，按需处理。" : text);
         sb.AppendLine();
 
-        var imageNames = attachments.Where(a => a.Kind == ChatAttachmentKind.Image).Select(a => a.FileName).ToList();
+        // 仅声明确实会进入 vision 请求的图片，避免模型误以为「已看图」
+        var imageNames = attachments
+            .Where(a => a.Kind == ChatAttachmentKind.Image && a.ImageBytes is { Length: > 0 })
+            .Select(a => a.FileName)
+            .ToList();
         if (imageNames.Count > 0)
             sb.AppendLine($"【用户上传了图片】{string.Join("、", imageNames)}（图已附在消息中，请仔细看）");
+
+        foreach (var a in attachments.Where(x =>
+                     x.Kind == ChatAttachmentKind.Image
+                     && (x.ImageBytes is null || x.ImageBytes.Length == 0)
+                     && !string.IsNullOrWhiteSpace(x.FullPath)))
+        {
+            sb.AppendLine();
+            sb.AppendLine($"【图片过大未能嵌入预览：{a.FileName}】");
+            sb.AppendLine($"本机路径：{a.FullPath}");
+            sb.AppendLine("请用工具按路径处理，或请用户换较小图片。");
+        }
 
         foreach (var a in attachments.Where(x => x.Kind == ChatAttachmentKind.Text))
         {
@@ -1074,9 +1102,11 @@ public sealed class AiAgentService
             sb.AppendLine("正文未预读（可能是二进制）。请用工具 read_file / open_path / list_dir 等按用户意图处理，不要说「看不到文件」。");
         }
 
-        // 图片也附上路径（若有），方便「把这张图挪到…」
+        // 已嵌入 vision 的图片也附路径（若有），方便「把这张图挪到…」
         foreach (var a in attachments.Where(x =>
-                     x.Kind == ChatAttachmentKind.Image && !string.IsNullOrWhiteSpace(x.FullPath)))
+                     x.Kind == ChatAttachmentKind.Image
+                     && x.ImageBytes is { Length: > 0 }
+                     && !string.IsNullOrWhiteSpace(x.FullPath)))
         {
             sb.AppendLine($"图片本机路径：{a.FullPath}（文件名 {a.FileName}）");
         }

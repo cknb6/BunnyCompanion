@@ -34,6 +34,7 @@ def validate_xml() -> None:
         PROJECT / "BunnyCompanion.csproj",
         PROJECT / "App.xaml",
         PROJECT / "MainWindow.xaml",
+        PROJECT / "ChatWindow.xaml",
         PROJECT / "SettingsWindow.xaml",
         PROJECT / "app.manifest",
     ]
@@ -46,9 +47,12 @@ def validate_xml() -> None:
 
 def validate_event_handlers() -> None:
     event_names = {
-        "Loaded", "Closing", "Click", "ValueChanged",
+        "Loaded", "Closing", "Closed", "Click", "ValueChanged",
         "MouseLeftButtonDown", "MouseLeftButtonUp", "MouseMove", "MouseRightButtonUp",
-        "LostMouseCapture",
+        "MouseDown", "MouseWheel", "LostMouseCapture",
+        "KeyDown", "PreviewKeyDown",
+        "PreviewDragEnter", "PreviewDragOver", "PreviewDragLeave", "PreviewDrop",
+        "DragEnter", "DragOver", "DragLeave", "Drop",
     }
     for xaml_path in PROJECT.glob("*.xaml"):
         code_path = xaml_path.with_suffix(".xaml.cs")

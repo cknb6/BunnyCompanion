@@ -521,16 +521,23 @@ public partial class ChatWindow : Window
                     return true;
                 }
 
-                var normalized = TryDownscaleImage(bytes) ?? bytes;
+                var normalized = TryDownscaleImage(bytes);
+                if (normalized is null && bytes.Length > 1_200_000)
+                {
+                    AppendSystemTip("剪贴板图片过大且压缩失败，请另存为较小文件后再添加。");
+                    return true;
+                }
+
+                var payload = normalized ?? bytes;
                 var name = $"粘贴图片_{DateTime.Now:HHmmss}.png";
                 _pending.Add(new PendingAttachment
                 {
                     Path = name,
                     FileName = name,
                     Kind = ChatAttachmentKind.Image,
-                    MimeType = "image/png",
-                    ImageBytes = normalized,
-                    SizeBytes = normalized.LongLength,
+                    MimeType = normalized is not null ? "image/jpeg" : "image/png",
+                    ImageBytes = payload,
+                    SizeBytes = payload.LongLength,
                 });
                 RefreshAttachBar();
                 AppendSystemTip($"已从剪贴板添加图片「{name}」。");
@@ -595,10 +602,22 @@ public partial class ChatWindow : Window
                 var original = File.ReadAllBytes(fullPath);
                 // 所有图片统一解码并限到 1280px，防止小体积超大像素图耗尽内存。
                 var normalized = TryDownscaleImage(original);
-                item.ImageBytes = normalized ?? original;
                 if (normalized is not null)
+                {
+                    item.ImageBytes = normalized;
                     item.MimeType = "image/jpeg";
-                return new AttachmentLoadResult(item, null);
+                    return new AttachmentLoadResult(item, null);
+                }
+
+                // 解码失败时：仅在原图不大时直传，避免把数 MB 原图塞进多模态导致静默丢弃却仍声称「已附图」
+                if (original.Length <= 1_200_000)
+                {
+                    item.ImageBytes = original;
+                    return new AttachmentLoadResult(item, null);
+                }
+
+                return new AttachmentLoadResult(
+                    null, $"「{info.Name}」图片处理失败或体积过大，已跳过。请换一张或先压缩。");
             }
 
             if (kind == ChatAttachmentKind.Text)
@@ -1143,19 +1162,57 @@ public partial class ChatWindow : Window
         if (AvatarCache.TryGetValue(isPet, out var cached))
             return cached;
 
-        var file = isPet ? "pet_avatar.png" : "user_avatar.png";
-        var uri = new Uri(
-            $"pack://application:,,,/BunnyCompanion;component/Assets/Avatars/{file}",
-            UriKind.Absolute);
-        var bmp = new BitmapImage();
-        bmp.BeginInit();
-        bmp.UriSource = uri;
-        bmp.CacheOption = BitmapCacheOption.OnLoad;
-        bmp.DecodePixelWidth = 128;
-        bmp.EndInit();
-        bmp.Freeze();
-        AvatarCache[isPet] = bmp;
-        return bmp;
+        try
+        {
+            var file = isPet ? "pet_avatar.png" : "user_avatar.png";
+            var uri = new Uri(
+                $"pack://application:,,,/BunnyCompanion;component/Assets/Avatars/{file}",
+                UriKind.Absolute);
+            var bmp = new BitmapImage();
+            bmp.BeginInit();
+            bmp.UriSource = uri;
+            bmp.CacheOption = BitmapCacheOption.OnLoad;
+            bmp.DecodePixelWidth = 128;
+            bmp.EndInit();
+            bmp.Freeze();
+            AvatarCache[isPet] = bmp;
+            return bmp;
+        }
+        catch
+        {
+            // 资源缺失时不要让整窗聊天崩溃：生成纯色占位图
+            var pixels = new byte[4];
+            if (isPet)
+            {
+                pixels[0] = 0xF0; // B
+                pixels[1] = 0xE8; // G
+                pixels[2] = 0xFF; // R
+                pixels[3] = 0xFF;
+            }
+            else
+            {
+                pixels[0] = 0x60;
+                pixels[1] = 0xC1;
+                pixels[2] = 0x07;
+                pixels[3] = 0xFF;
+            }
+
+            var placeholder = BitmapSource.Create(
+                1, 1, 96, 96, PixelFormats.Bgra32, null, pixels, 4);
+            var encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(placeholder));
+            using var ms = new MemoryStream();
+            encoder.Save(ms);
+            ms.Position = 0;
+            var bmp = new BitmapImage();
+            bmp.BeginInit();
+            bmp.CacheOption = BitmapCacheOption.OnLoad;
+            bmp.StreamSource = ms;
+            bmp.EndInit();
+            bmp.Freeze();
+            AvatarCache[isPet] = bmp;
+            return bmp;
+        }
     }
 
     private Border CreateTextBubble(string text, bool isPet)
@@ -1318,26 +1375,42 @@ public partial class ChatWindow : Window
         AppendSystemTip("🎤 正在听你说（约 8 秒）…说完稍等一下。");
         _ = Task.Run(() =>
         {
-            var text = VoiceService.RecognizeOnce(9000);
-            Dispatcher.Invoke(() =>
+            string text = string.Empty;
+            try
             {
-                if (!IsLoaded)
-                    return;
-                VoiceButton.Content = oldContent;
-                VoiceButton.IsEnabled = true;
-                if (string.IsNullOrWhiteSpace(text))
+                text = VoiceService.RecognizeOnce(9000);
+            }
+            catch
+            {
+                text = string.Empty;
+            }
+
+            try
+            {
+                Dispatcher.Invoke(() =>
                 {
-                    StatusText.Text = "没听清，再说一次或直接打字～";
-                    AppendSystemTip("没听清～请靠近麦克风、说清楚一点，或改用打字。也可在 Windows 设置里安装「中文语音识别」。");
-                    return;
-                }
-                InputBox.Text = text;
-                InputBox.Focus();
-                InputBox.CaretIndex = text.Length;
-                StatusText.Text = "已识别，正在发送…";
-                // 识别成功后自动发送，减少一步点击
-                _ = SendAsync(includeDesktop: DesktopCheck.IsChecked == true);
-            });
+                    if (!IsLoaded)
+                        return;
+                    VoiceButton.Content = oldContent;
+                    VoiceButton.IsEnabled = !_busy;
+                    if (string.IsNullOrWhiteSpace(text))
+                    {
+                        StatusText.Text = "没听清，再说一次或直接打字～";
+                        AppendSystemTip("没听清～请靠近麦克风、说清楚一点，或改用打字。也可在 Windows 设置里安装「中文语音识别」。");
+                        return;
+                    }
+                    InputBox.Text = text;
+                    InputBox.Focus();
+                    InputBox.CaretIndex = text.Length;
+                    StatusText.Text = "已识别，正在发送…";
+                    // 识别成功后自动发送，减少一步点击
+                    _ = SendAsync(includeDesktop: DesktopCheck.IsChecked == true);
+                });
+            }
+            catch
+            {
+                // 窗口已关或调度失败：忽略
+            }
         });
     }
 

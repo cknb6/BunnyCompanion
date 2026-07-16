@@ -1695,15 +1695,25 @@ public partial class MainWindow : Window
             {
                 var report = await WindowsAgentToolkit.ExecuteAsync("get_weather", new System.Text.Json.Nodes.JsonObject(), CancellationToken.None)
                     .ConfigureAwait(false);
-                // 只抽预警行做短气泡
+                // 抽预警 + 关心提醒行做短气泡
                 var alertLines = report.Split('\n')
-                    .Where(l => l.Contains("高温", StringComparison.Ordinal) || l.Contains("降水", StringComparison.Ordinal)
-                                                                            || l.Contains("雷电", StringComparison.Ordinal))
+                    .Where(l =>
+                    {
+                        var t = l.TrimStart('·', ' ', '\t');
+                        return t.Contains("高温", StringComparison.Ordinal)
+                               || t.Contains("降水", StringComparison.Ordinal)
+                               || t.Contains("雷电", StringComparison.Ordinal)
+                               || t.Contains("紫外线", StringComparison.Ordinal)
+                               || t.Contains("穿衣", StringComparison.Ordinal)
+                               || t.Contains("带伞", StringComparison.Ordinal)
+                               || t.Contains("防晒", StringComparison.Ordinal)
+                               || t.Contains("补水", StringComparison.Ordinal);
+                    })
                     .Take(2)
                     .Select(l => l.TrimStart('·', ' ', '\t'))
                     .ToList();
                 var msg = alertLines.Count > 0
-                    ? "天气提醒：" + string.Join("；", alertLines)
+                    ? "天气关心：" + string.Join("；", alertLines)
                     : null;
                 if (msg is null) return;
                 await Dispatcher.InvokeAsync(() =>

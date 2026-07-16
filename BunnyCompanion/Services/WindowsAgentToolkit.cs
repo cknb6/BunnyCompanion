@@ -1,4 +1,6 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Net.Http;
 using System.Net.NetworkInformation;
@@ -20,6 +22,22 @@ public static class WindowsAgentToolkit
     {
         Timeout = TimeSpan.FromSeconds(25),
     };
+
+    /// <summary>
+    /// 天气结果本地缓存：降低 Open-Meteo / wttr 调用频率（免费档按 IP 限流）。
+    /// Open-Meteo 免费约 600/分、5000/时、10000/日；桌宠场景 12 分钟缓存足够。
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, (DateTime At, string Report)> WeatherCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan WeatherCacheTtl = TimeSpan.FromMinutes(12);
+
+    /// <summary>
+    /// 自动定位失败 / 不可靠时的默认关心地点（用户指定：西安未央凤城九路）。
+    /// 坐标为该路段附近近似点，供 Open-Meteo 网格预报；非 GPS 精定位。
+    /// </summary>
+    private const string DefaultHomePlace = "陕西省西安市未央区凤城九路";
+    private const string DefaultHomeGeocodeQuery = "西安";
+    private const double DefaultHomeLat = 34.3415;
+    private const double DefaultHomeLon = 108.9398;
 
     static WindowsAgentToolkit()
     {
@@ -58,8 +76,10 @@ public static class WindowsAgentToolkit
             "用户问「我在哪」「定位」时必须调用。",
             new JsonObject()),
         Tool("get_weather",
-            "查询实时天气与高温/降水等预警。可指定 city；不指定则优先用国内 IP 定位城市再查天气。",
-            Props(("city", "string", "城市名，如 北京、上海、深圳；可空则自动定位（偏中国网络）"))),
+            "查询实时天气（免费多源：Open-Meteo 优先，失败回退 wttr.in；本地缓存约 12 分钟）。" +
+            "返回地点/纬度/经度/坐标来源、气温体感、【提醒与预警】与【关心提醒】。" +
+            "可指定 city；不指定则国内 IP 定位。定位失败或 VPN 不可靠时默认查「西安未央凤城九路」（会在结果中注明）。",
+            Props(("city", "string", "城市名，如 北京、上海、深圳；可空则自动定位，失败回退西安未央凤城九路"))),
         Tool("memo_add",
             "添加备忘/提醒。text 为事项；due 可选本地时间（如 2026-07-16 15:30 或 30分钟后/明天9点 口语会由上层解析，工具侧优先 ISO）。",
             Props(
@@ -469,14 +489,50 @@ public static class WindowsAgentToolkit
         sb.AppendLine($"城市: {hit.City}");
         if (!string.IsNullOrWhiteSpace(hit.District))
             sb.AppendLine($"区: {hit.District}");
-        if (!string.IsNullOrWhiteSpace(hit.Lat) && !string.IsNullOrWhiteSpace(hit.Lon))
-            sb.AppendLine($"经纬度: {hit.Lat}, {hit.Lon}");
+        // 经纬度分字段写清：十进制度 + 南北/东西半球说明，方便后续 get_weather 透传
+        if (TryParseLatLon(hit.Lat, hit.Lon, out var latD, out var lonD))
+        {
+            sb.AppendLine($"纬度(Latitude): {WeatherReport.FormatCoord(latD)}°（{(latD >= 0 ? "北纬" : "南纬")} {Math.Abs(latD):0.#####}°）");
+            sb.AppendLine($"经度(Longitude): {WeatherReport.FormatCoord(lonD)}°（{(lonD >= 0 ? "东经" : "西经")} {Math.Abs(lonD):0.#####}°）");
+            sb.AppendLine($"坐标对: {WeatherReport.FormatCoord(latD)}, {WeatherReport.FormatCoord(lonD)}");
+            sb.AppendLine("坐标用途: 可直接用于天气查询（Open-Meteo 按该点位取网格预报）");
+        }
+        else
+        {
+            sb.AppendLine("纬度(Latitude): 未知（本源未返回）");
+            sb.AppendLine("经度(Longitude): 未知（本源未返回）");
+            sb.AppendLine("坐标对: 未知");
+            if (!string.IsNullOrWhiteSpace(hit.Lat) || !string.IsNullOrWhiteSpace(hit.Lon))
+                sb.AppendLine($"原始坐标字段: lat={hit.Lat} lon={hit.Lon}（解析失败）");
+        }
+
         if (!string.IsNullOrWhiteSpace(hit.Isp))
             sb.AppendLine($"运营商/ISP: {hit.Isp}");
 
         sb.AppendLine();
         sb.AppendLine(BuildGeoDisclaimer(hit));
         return sb.ToString().Trim();
+    }
+
+    /// <summary>安全解析 IP 库返回的经纬度字符串（可能含空格或中文逗号）。</summary>
+    private static bool TryParseLatLon(string? lat, string? lon, out double latD, out double lonD)
+    {
+        latD = 0;
+        lonD = 0;
+        if (string.IsNullOrWhiteSpace(lat) || string.IsNullOrWhiteSpace(lon))
+            return false;
+        lat = lat.Trim().Replace('，', '.').Replace(',', '.');
+        lon = lon.Trim().Replace('，', '.').Replace(',', '.');
+        // 若整串被写成 "31.2,121.4" 塞进 lat
+        if (lat.Contains(' ') || (lat.Count(c => c == '.') > 1))
+        {
+            // ignore odd forms
+        }
+
+        return double.TryParse(lat, NumberStyles.Any, CultureInfo.InvariantCulture, out latD)
+               && double.TryParse(lon, NumberStyles.Any, CultureInfo.InvariantCulture, out lonD)
+               && latD is >= -90 and <= 90
+               && lonD is >= -180 and <= 180;
     }
 
     /// <summary>
@@ -623,14 +679,52 @@ public static class WindowsAgentToolkit
         }
 
         var chinaHits = hits.Where(IsChina).ToList();
+        GeoHit? picked;
         if (chinaHits.Count > 0)
         {
-            // 国内源优先
-            return chinaHits.FirstOrDefault(h => h.PreferChinaSource) ?? chinaHits[0];
+            // 国内源优先取中文省市区；经纬度若为空，从同批其它源合并（国内库常无坐标）
+            picked = chinaHits.FirstOrDefault(h => h.PreferChinaSource) ?? chinaHits[0];
+        }
+        else
+        {
+            // 全是境外：仍返回，但调用方会加 VPN 警告
+            picked = hits.FirstOrDefault(h => h.PreferChinaSource) ?? hits[0];
         }
 
-        // 全是境外：仍返回，但调用方会加 VPN 警告
-        return hits.FirstOrDefault(h => h.PreferChinaSource) ?? hits[0];
+        return MergeCoordsFromHits(picked, hits);
+    }
+
+    /// <summary>
+    /// 保留主 hit 的中文地名/来源；若 Lat/Lon 为空，从同批 hits 回填可解析坐标。
+    /// </summary>
+    private static GeoHit MergeCoordsFromHits(GeoHit primary, List<GeoHit> all)
+    {
+        if (TryParseLatLon(primary.Lat, primary.Lon, out _, out _))
+            return primary;
+
+        foreach (var h in all)
+        {
+            if (ReferenceEquals(h, primary))
+                continue;
+            if (!TryParseLatLon(h.Lat, h.Lon, out var la, out var lo))
+                continue;
+            // 仅在同属「中国」语境或主 hit 本身无中国标记时合并，避免把境外 VPN 坐标硬塞给国内城市名
+            var primaryChina = (primary.Country + primary.Province).Contains("中国", StringComparison.Ordinal)
+                               || (primary.Country + primary.Province).Contains("China", StringComparison.OrdinalIgnoreCase);
+            var donorChina = (h.Country + h.Province).Contains("中国", StringComparison.Ordinal)
+                             || (h.Country + h.Province).Contains("China", StringComparison.OrdinalIgnoreCase);
+            if (primaryChina && !donorChina)
+                continue;
+
+            return primary with
+            {
+                Lat = WeatherReport.FormatCoord(la),
+                Lon = WeatherReport.FormatCoord(lo),
+                Source = primary.Source + $"（坐标合并自 {h.Source}）",
+            };
+        }
+
+        return primary;
     }
 
     private static string BuildGeoDisclaimer(GeoHit hit)
@@ -668,7 +762,12 @@ public static class WindowsAgentToolkit
     private static async Task<string> GetWeatherAsync(string? city, CancellationToken ct)
     {
         city = string.IsNullOrWhiteSpace(city) ? null : city.Trim();
-        string? lat = null, lon = null, place = city;
+        string? place = city;
+        double? latD = null, lonD = null;
+        var coordSource = "未解析";
+        var autoLocated = city is null;
+        var usedHomeFallback = false;
+        string? vpnNote = null;
 
         if (city is null)
         {
@@ -678,45 +777,187 @@ public static class WindowsAgentToolkit
             {
                 place = string.Join(" ", new[] { hit.Country, hit.Province, hit.City, hit.District }
                     .Where(s => !string.IsNullOrWhiteSpace(s)));
-                lat = hit.Lat;
-                lon = hit.Lon;
-                city = !string.IsNullOrWhiteSpace(hit.City) ? hit.City : hit.Province;
-                // 境外 VPN 结果不要拿去查天气，改为让用户说城市
-                var abroad = BuildGeoDisclaimer(hit).Contains("境外", StringComparison.Ordinal)
-                             || BuildGeoDisclaimer(hit).Contains("VPN", StringComparison.Ordinal);
+                city = !string.IsNullOrWhiteSpace(hit.City)
+                    ? hit.City
+                    : (!string.IsNullOrWhiteSpace(hit.Province) ? hit.Province : null);
+                // 空串归一
+                if (string.IsNullOrWhiteSpace(city))
+                    city = null;
+
+                if (TryParseLatLon(hit.Lat, hit.Lon, out var la, out var lo))
+                {
+                    latD = la;
+                    lonD = lo;
+                    coordSource = $"IP 定位源 {hit.Source} 的 latitude/longitude";
+                }
+                else
+                {
+                    coordSource = $"IP 定位源 {hit.Source} 未提供有效经纬度（原始 lat={hit.Lat} lon={hit.Lon}）";
+                }
+
+                var disclaimer = BuildGeoDisclaimer(hit);
+                var abroad = disclaimer.Contains("境外", StringComparison.Ordinal)
+                             || disclaimer.Contains("VPN", StringComparison.Ordinal);
+                // 境外/VPN 出口不可靠：不硬失败，默默改查默认关心地点
                 if (abroad && !string.IsNullOrWhiteSpace(hit.Country)
                     && !hit.Country.Contains("中国", StringComparison.Ordinal)
                     && !hit.Country.Contains("China", StringComparison.OrdinalIgnoreCase))
                 {
-                    return "当前公网出口更像 VPN/境外 IP，自动定位不可靠。\n" +
-                           "请直接说城市查天气，例如：「北京天气」「上海今天热不热」。\n\n" +
-                           BuildGeoDisclaimer(hit);
+                    city = null;
+                    place = null;
+                    latD = null;
+                    lonD = null;
+                    usedHomeFallback = true;
+                    vpnNote = "自动定位像境外/VPN，已改用默认关心地点（西安未央凤城九路）。";
+                }
+                else if (abroad)
+                {
+                    vpnNote = "（定位规则: 优先国内 IP 库；开 VPN 时请直接说城市名。）";
                 }
             }
         }
 
-        // wttr.in 免费天气，支持中文 + 逐时降水
+        // 定位失败 / 无城市：默默回退到西安未央凤城九路（用户指定默认点）
+        if (string.IsNullOrWhiteSpace(city) && latD is null)
+        {
+            var home = await ResolveDefaultHomeLocationAsync(ct).ConfigureAwait(false);
+            city = home.City;
+            place = home.Place;
+            latD = home.Lat;
+            lonD = home.Lon;
+            coordSource = home.CoordSource;
+            usedHomeFallback = true;
+        }
+
+        // 仅城市名或 IP 无坐标时：Open-Meteo 地理编码补全
+        if ((latD is null || lonD is null) && !string.IsNullOrWhiteSpace(city))
+        {
+            var geo = await TryGeocodeOpenMeteoAsync(city!, ct).ConfigureAwait(false);
+            if (geo is not null)
+            {
+                latD = geo.Value.Lat;
+                lonD = geo.Value.Lon;
+                if (string.IsNullOrWhiteSpace(place) || place == city)
+                    place = usedHomeFallback ? DefaultHomePlace : geo.Value.Place;
+                coordSource =
+                    $"Open-Meteo 地理编码 JSON results[] → latitude={WeatherReport.FormatCoord(geo.Value.Lat)}, longitude={WeatherReport.FormatCoord(geo.Value.Lon)}（查询名: {city}）";
+            }
+            else if (usedHomeFallback)
+            {
+                // 地理编码失败仍用内置近似坐标，保证能出天气
+                latD = DefaultHomeLat;
+                lonD = DefaultHomeLon;
+                place = DefaultHomePlace;
+                city = DefaultHomeGeocodeQuery;
+                coordSource =
+                    $"默认关心地点内置近似坐标 latitude={WeatherReport.FormatCoord(DefaultHomeLat)}, longitude={WeatherReport.FormatCoord(DefaultHomeLon)}（{DefaultHomePlace}）";
+            }
+        }
+
+        var latStr = latD is double x ? WeatherReport.FormatCoord(x) : null;
+        var lonStr = lonD is double y ? WeatherReport.FormatCoord(y) : null;
+        var cacheKey = BuildWeatherCacheKey(city, latStr, lonStr);
+        if (WeatherCache.TryGetValue(cacheKey, out var cached)
+            && DateTime.UtcNow - cached.At < WeatherCacheTtl)
+        {
+            return cached.Report + "\n（本地缓存，约 12 分钟内复用，避免触发免费接口限流）";
+        }
+
+        var errors = new List<string>();
+        string Footnote(string report)
+        {
+            if (usedHomeFallback)
+            {
+                report += "\n\n（说明: 自动定位失败或不可靠，已按默认关心地点查询：" +
+                          DefaultHomePlace +
+                          "。若要查别处请直接说城市名，例如「上海天气」。）";
+            }
+            else if (autoLocated)
+            {
+                report += "\n\n（定位规则: 优先国内 IP 库；开 VPN 时请直接说城市名。）";
+            }
+            else if (!string.IsNullOrWhiteSpace(vpnNote))
+            {
+                report += "\n\n" + vpnNote;
+            }
+
+            return report;
+        }
+
+        // ① 主源：Open-Meteo
+        if (latD is double reqLat && lonD is double reqLon)
+        {
+            try
+            {
+                var report = await FetchOpenMeteoWeatherAsync(reqLat, reqLon, place, coordSource, ct)
+                    .ConfigureAwait(false);
+                if (!string.IsNullOrWhiteSpace(report))
+                {
+                    report = Footnote(report);
+                    WeatherCache[cacheKey] = (DateTime.UtcNow, report);
+                    return report;
+                }
+
+                errors.Add("Open-Meteo: 响应无效或无法解析 current");
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                errors.Add("Open-Meteo: " + ex.Message);
+            }
+        }
+        else
+        {
+            errors.Add(
+                $"Open-Meteo: 缺少有效经纬度（city={city ?? "null"}, place={place ?? "null"}, coordSource={coordSource}）");
+        }
+
+        // ② 备源：wttr.in —— 绝不静默北京；无坐标时用默认关心地点
         try
         {
-            var q = !string.IsNullOrWhiteSpace(lat) && !string.IsNullOrWhiteSpace(lon)
-                ? $"{lat},{lon}"
-                : (city ?? "Beijing");
-            // 中文城市名对 wttr 更友好
-            if (q.Contains("市", StringComparison.Ordinal) && q.EndsWith("市", StringComparison.Ordinal))
-                q = q.TrimEnd('市');
+            string q;
+            if (latD is double wLat && lonD is double wLon)
+            {
+                q = $"{WeatherReport.FormatCoord(wLat)},{WeatherReport.FormatCoord(wLon)}";
+            }
+            else
+            {
+                // 最后兜底：默认关心地点（不再用 Beijing）
+                q = string.IsNullOrWhiteSpace(city) ? DefaultHomeGeocodeQuery : city!;
+                if (q.Contains("市", StringComparison.Ordinal) && q.EndsWith("市", StringComparison.Ordinal))
+                    q = q.TrimEnd('市');
+                place ??= DefaultHomePlace;
+                if (!usedHomeFallback && string.IsNullOrWhiteSpace(city))
+                    usedHomeFallback = true;
+            }
+
             var url = $"https://wttr.in/{Uri.EscapeDataString(q)}?format=j1&lang=zh";
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
             req.Headers.TryAddWithoutValidation("Accept-Language", "zh-CN");
             req.Headers.TryAddWithoutValidation("User-Agent", "XiaoShenCompanion/1.4");
             using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
             var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-            if (resp.IsSuccessStatusCode)
+            if (resp.IsSuccessStatusCode && body.Contains("current_condition", StringComparison.Ordinal))
             {
-                var report = WeatherReport.FormatWeatherBroadcast(body, place);
-                if (city is null)
-                    report += "\n\n（定位规则: 优先国内 IP 库；开 VPN 时请直接说城市名。）";
+                var report = WeatherReport.FormatWeatherBroadcast(
+                    body,
+                    place ?? DefaultHomePlace,
+                    latD ?? DefaultHomeLat,
+                    lonD ?? DefaultHomeLon,
+                    coordSource: latD is not null
+                        ? coordSource + "（wttr 备源；坐标由上游透传）"
+                        : $"默认/查询地名 wttr（{q}）");
+                report = Footnote(report);
+                if (errors.Count > 0)
+                    report += "\n（主源 Open-Meteo 暂不可用，已用 wttr.in 备源）";
+                WeatherCache[cacheKey] = (DateTime.UtcNow, report);
                 return report;
             }
+
+            errors.Add($"wttr.in: HTTP {(int)resp.StatusCode}，bodyLen={body.Length}");
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -724,10 +965,212 @@ public static class WindowsAgentToolkit
         }
         catch (Exception ex)
         {
-            return $"天气查询失败: {ex.Message}";
+            errors.Add("wttr.in: " + ex.Message);
         }
 
-        return "天气查询失败：接口无响应。";
+        return "天气查询失败：多源接口均无有效响应。\n" + string.Join("\n", errors.Select(e => "· " + e));
+    }
+
+    /// <summary>
+    /// 默认关心地点：西安未央凤城九路。
+    /// 始终用内置近似坐标（未央凤城九路附近），避免地理编码落到西安市中心偏离目标路段。
+    /// </summary>
+    private static Task<(string City, string Place, double Lat, double Lon, string CoordSource)>
+        ResolveDefaultHomeLocationAsync(CancellationToken ct)
+    {
+        _ = ct;
+        return Task.FromResult((
+            DefaultHomeGeocodeQuery,
+            DefaultHomePlace,
+            DefaultHomeLat,
+            DefaultHomeLon,
+            $"定位失败→默认关心地点 {DefaultHomePlace}；" +
+            $"纬度(Latitude)={WeatherReport.FormatCoord(DefaultHomeLat)}，" +
+            $"经度(Longitude)={WeatherReport.FormatCoord(DefaultHomeLon)}（凤城九路附近近似点，非 GPS）"));
+    }
+
+    private static string BuildWeatherCacheKey(string? city, string? lat, string? lon)
+    {
+        if (!string.IsNullOrWhiteSpace(lat) && !string.IsNullOrWhiteSpace(lon))
+            return $"ll:{lat},{lon}";
+        if (!string.IsNullOrWhiteSpace(city))
+            return "city:" + city.Trim();
+        return "city:home-xian-weiyang-fengcheng9";
+    }
+
+    private static async Task<(double Lat, double Lon, string Place)?> TryGeocodeOpenMeteoAsync(
+        string city, CancellationToken ct)
+    {
+        try
+        {
+            var name = city.Trim().TrimEnd('市', '省', '区', '县');
+            if (string.IsNullOrWhiteSpace(name))
+                name = city.Trim();
+            var url =
+                "https://geocoding-api.open-meteo.com/v1/search?name=" +
+                Uri.EscapeDataString(name) +
+                "&count=3&language=zh&format=json";
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.TryAddWithoutValidation("Accept-Language", "zh-CN");
+            using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+                return null;
+            var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(body))
+                return null;
+
+            using var doc = JsonDocument.Parse(body);
+            if (!doc.RootElement.TryGetProperty("results", out var results)
+                || results.ValueKind != JsonValueKind.Array
+                || results.GetArrayLength() == 0)
+                return null;
+
+            JsonElement best = results[0];
+            foreach (var r in results.EnumerateArray())
+            {
+                var cc = r.TryGetProperty("country_code", out var c) ? c.GetString() : null;
+                if (string.Equals(cc, "CN", StringComparison.OrdinalIgnoreCase))
+                {
+                    best = r;
+                    break;
+                }
+            }
+
+            if (!best.TryGetProperty("latitude", out var latEl) || !best.TryGetProperty("longitude", out var lonEl))
+                return null;
+
+            var lat = latEl.ValueKind == JsonValueKind.Number
+                ? latEl.GetDouble()
+                : double.Parse(latEl.GetString() ?? "", CultureInfo.InvariantCulture);
+            var lon = lonEl.ValueKind == JsonValueKind.Number
+                ? lonEl.GetDouble()
+                : double.Parse(lonEl.GetString() ?? "", CultureInfo.InvariantCulture);
+
+            var n = best.TryGetProperty("name", out var ne) ? ne.GetString() : name;
+            var admin1 = best.TryGetProperty("admin1", out var a1) ? a1.GetString() : null;
+            var country = best.TryGetProperty("country", out var co) ? co.GetString() : null;
+            var place = string.Join(" ", new[] { country, admin1, n }.Where(s => !string.IsNullOrWhiteSpace(s)));
+            return (lat, lon, place);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static async Task<string?> FetchOpenMeteoWeatherAsync(
+        double lat, double lon, string? place, string coordSource, CancellationToken ct)
+    {
+        // URL 查询参数必须用 InvariantCulture，避免逗号当小数点
+        var latQ = WeatherReport.FormatCoord(lat);
+        var lonQ = WeatherReport.FormatCoord(lon);
+        var url =
+            "https://api.open-meteo.com/v1/forecast?" +
+            $"latitude={latQ}&longitude={lonQ}" +
+            "&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m" +
+            "&hourly=temperature_2m,precipitation_probability,weather_code,uv_index" +
+            "&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,uv_index_max" +
+            "&timezone=auto&forecast_days=1&wind_speed_unit=kmh";
+
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        req.Headers.TryAddWithoutValidation("Accept-Language", "zh-CN");
+        using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
+        var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        if (!resp.IsSuccessStatusCode)
+            throw new InvalidOperationException($"HTTP {(int)resp.StatusCode}，请求坐标 lat={latQ} lon={lonQ}");
+        if (string.IsNullOrWhiteSpace(body) || !body.Contains("\"current\"", StringComparison.Ordinal))
+            return null;
+
+        // 请求坐标 + 响应 JSON 一起传入，解析层会对照网格偏差并写清
+        var snap = WeatherReport.ParseOpenMeteo(body, place, lat, lon, coordSource);
+        var report = WeatherReport.FormatSnapshot(snap);
+
+        try
+        {
+            var aqiLine = await TryFetchOpenMeteoAirQualityLineAsync(lat, lon, ct).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(aqiLine))
+            {
+                const string marker = "【关心提醒】";
+                var idx = report.IndexOf(marker, StringComparison.Ordinal);
+                if (idx >= 0)
+                    report = report.Insert(idx, aqiLine + "\n");
+                else
+                    report += "\n" + aqiLine;
+            }
+        }
+        catch
+        {
+            // 空气质量失败不影响主天气
+        }
+
+        return report;
+    }
+
+    private static async Task<string?> TryFetchOpenMeteoAirQualityLineAsync(
+        double lat, double lon, CancellationToken ct)
+    {
+        var latQ = WeatherReport.FormatCoord(lat);
+        var lonQ = WeatherReport.FormatCoord(lon);
+        var url =
+            "https://air-quality-api.open-meteo.com/v1/air-quality?" +
+            $"latitude={latQ}&longitude={lonQ}" +
+            "&current=pm2_5,us_aqi,european_aqi";
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
+        if (!resp.IsSuccessStatusCode)
+            return null;
+        var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(body))
+            return null;
+
+        using var doc = JsonDocument.Parse(body);
+        if (!doc.RootElement.TryGetProperty("current", out var cur) || cur.ValueKind != JsonValueKind.Object)
+            return null;
+
+        double? pm25 = ReadJsonDouble(cur, "pm2_5");
+        double? usAqi = ReadJsonDouble(cur, "us_aqi");
+        double? euAqi = ReadJsonDouble(cur, "european_aqi");
+        if (pm25 is null && usAqi is null && euAqi is null)
+            return null;
+
+        var parts = new List<string>();
+        if (pm25 is double pm)
+            parts.Add($"PM2.5 {pm:0.#}");
+        if (usAqi is double ua)
+            parts.Add($"美标 AQI {ua:0.#}");
+        if (euAqi is double ea)
+            parts.Add($"欧标 AQI {ea:0.#}");
+
+        var level = usAqi switch
+        {
+            >= 151 => "空气较差，敏感体质少户外剧烈运动",
+            >= 101 => "空气一般，外出可考虑口罩",
+            >= 51 => "空气尚可",
+            _ => "空气较好",
+        };
+        if (usAqi is null && pm25 is >= 75)
+            level = "PM2.5 偏高，外出注意防护";
+        else if (usAqi is null && pm25 is >= 35)
+            level = "PM2.5 略高，敏感可少户外";
+
+        return
+            $"空气质量（坐标 lat={latQ}, lon={lonQ}）: {string.Join(" · ", parts)}（{level}）";
+    }
+
+    private static double? ReadJsonDouble(JsonElement e, string name)
+    {
+        if (!e.TryGetProperty(name, out var p))
+            return null;
+        return p.ValueKind switch
+        {
+            JsonValueKind.Number => p.GetDouble(),
+            JsonValueKind.String when double.TryParse(p.GetString(), NumberStyles.Any, CultureInfo.InvariantCulture, out var d) => d,
+            _ => null,
+        };
     }
 
     /// <summary>转发至 WeatherReport，保持工具入口稳定。</summary>
