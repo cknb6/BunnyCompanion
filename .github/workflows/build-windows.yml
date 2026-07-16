@@ -36,7 +36,6 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          # 每个矩阵任务单独交付，避免互相覆盖校验文件
           Remove-Item "可直接发送" -Recurse -Force -ErrorAction SilentlyContinue
           & .\Build-Windows.ps1 -Runtime ${{ matrix.rid }} -Configuration Release
           Get-ChildItem "可直接发送" | Format-Table Name, Length
@@ -60,56 +59,106 @@ jobs:
           pattern: build-*
           merge-multiple: true
 
-      - name: List files
+      # 仅准备 ASCII 文件名，避免 softprops/gh 对中文资源名做 label 更新时 404
+      - name: Prepare release assets (ASCII names only)
+        shell: bash
         run: |
-          find artifacts -type f -exec ls -lh {} \;
-          # 合并说明/校验（若有多份，保留任意一份说明即可）
+          set -euo pipefail
           mkdir -p dist
-          cp -f artifacts/BunnyCompanion-win-x64.exe dist/ 2>/dev/null || true
-          cp -f artifacts/BunnyCompanion-win-arm64.exe dist/ 2>/dev/null || true
-          # 中文名可能因编码在 runner 上显示异常，以英文名为准
-          if [ -f artifacts/BunnyCompanion-win-x64.exe ]; then
-            cp -f artifacts/BunnyCompanion-win-x64.exe dist/XiaoShenCompanion-x64.exe
+          find artifacts -type f -exec ls -lh {} \;
+
+          # 主产物：固定英文名（必选）
+          x64="$(find artifacts -name 'BunnyCompanion-win-x64.exe' -type f | head -n1)"
+          arm64="$(find artifacts -name 'BunnyCompanion-win-arm64.exe' -type f | head -n1)"
+          if [[ -z "${x64}" || -z "${arm64}" ]]; then
+            echo "Missing required EXEs"
+            find artifacts -type f
+            exit 1
           fi
-          if [ -f artifacts/BunnyCompanion-win-arm64.exe ]; then
-            cp -f artifacts/BunnyCompanion-win-arm64.exe dist/XiaoShenCompanion-arm64.exe
+          cp -f "$x64" dist/BunnyCompanion-win-x64.exe
+          cp -f "$arm64" dist/BunnyCompanion-win-arm64.exe
+
+          # 说明 / 校验：转成英文名，避免中文文件名触发 release asset label API 问题
+          readme="$(find artifacts -name '使用说明.txt' -type f | head -n1 || true)"
+          if [[ -n "${readme}" ]]; then
+            cp -f "$readme" dist/README-zh.txt
           fi
-          # 复制中文文件名（若存在）
-          find artifacts -name '*.exe' -o -name '*.txt' | while read f; do
-            base=$(basename "$f")
-            case "$base" in
-              BunnyCompanion-win-x64.exe|BunnyCompanion-win-arm64.exe) ;;
-              *) cp -f "$f" "dist/$base" 2>/dev/null || true ;;
-            esac
-          done
+          checksum="$(find artifacts -name '版本校验.txt' -type f | head -n1 || true)"
+          if [[ -n "${checksum}" ]]; then
+            cp -f "$checksum" dist/checksums.txt
+          fi
+
           ls -lh dist
+          # 仅允许 ASCII 文件名（防止再次踩 release asset label 404）
+          for f in dist/*; do
+            base="$(basename "$f")"
+            if [[ ! "$base" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              echo "Non-ASCII or unsafe filename in dist: $base"
+              exit 1
+            fi
+          done
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v1.1.${{ github.run_number }}
-          name: 小申陪伴 v1.1.${{ github.run_number }}
-          body: |
-            ## 下载说明（请按电脑 CPU 选择）
+      - name: Write release notes
+        shell: bash
+        run: |
+          cat > release-notes.md <<EOF
+          ## 下载说明（请按电脑 CPU 选择）
 
-            | 文件 | 适用电脑 |
-            |------|----------|
-            | **BunnyCompanion-win-x64.exe**（或 小申陪伴-x64.exe） | 绝大多数 Intel / AMD Windows（含多数 Windows on ARM 的 x64 兼容） |
-            | **BunnyCompanion-win-arm64.exe**（或 小申陪伴-arm64.exe） | 原生 ARM64 Windows（如部分 Surface / Snapdragon 本） |
+          | 文件 | 适用电脑 |
+          |------|----------|
+          | **BunnyCompanion-win-x64.exe** | 绝大多数 Intel / AMD Windows（含多数 Windows on ARM 的 x64 兼容） |
+          | **BunnyCompanion-win-arm64.exe** | 原生 ARM64 Windows（如部分 Surface / Snapdragon 本） |
+          | README-zh.txt | 中文使用说明 |
+          | checksums.txt | 校验信息（若有） |
 
-            - **自包含**，约 70～100MB，**无需安装 .NET**
-            - **不要**下多个名字相同架构的重复文件；每个架构只需一个 EXE
-            - SmartScreen 若拦截：更多信息 → 仍要运行
+          - **自包含**，约 70～100MB，**无需安装 .NET**
+          - 每个架构只需下载 **一个** EXE
+          - SmartScreen 若拦截：更多信息 → 仍要运行
 
-            ### 为何不能只有一个「通用 EXE」？
-            Windows 自包含 .NET 程序按 CPU 架构分别打包（x64 / ARM64），无法像部分安装包那样合成单一原生二进制。  
-            若只下一个文件：优先 **x64**（兼容面最广）。
+          ### 为何不能只有一个「通用 EXE」？
+          Windows 自包含 .NET 程序按 CPU 架构分别打包（x64 / ARM64），无法合成单一原生二进制。  
+          不确定时优先 **x64**。
 
-            提交：`${{ github.sha }}`
-          files: dist/*
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-          fail_on_unmatched_files: false
+          ### 开发者
+          **本软件由传康KK开发。**  
+          打包账号：cknb6（Actions）；开发者大号：1837620622。
+
+          提交：\`${{ github.sha }}\`
+          Run：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+
+      # 不用 softprops：中文名 + overwrite 会调 update-a-release-asset 导致 Not Found
+      - name: Create GitHub Release (gh CLI)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="v1.1.${{ github.run_number }}"
+          TITLE="小申陪伴 ${TAG}"
+          TARGET="${{ github.sha }}"
+
+          # 若同 tag 已存在（workflow 重跑），先删再发
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — deleting for clean recreate"
+            gh release delete "$TAG" --yes || true
+            git push origin ":refs/tags/${TAG}" 2>/dev/null || true
+          fi
+
+          ASSETS=(dist/BunnyCompanion-win-x64.exe dist/BunnyCompanion-win-arm64.exe)
+          [[ -f dist/README-zh.txt ]] && ASSETS+=(dist/README-zh.txt)
+          [[ -f dist/checksums.txt ]] && ASSETS+=(dist/checksums.txt)
+
+          for a in "${ASSETS[@]}"; do
+            [[ -f "$a" ]] || { echo "missing $a"; exit 1; }
+          done
+
+          # --target：release job 无 checkout 时也能钉到触发 commit
+          gh release create "$TAG" "${ASSETS[@]}" \
+            --title "$TITLE" \
+            --notes-file release-notes.md \
+            --target "$TARGET" \
+            --latest
+
+          echo "Release created:"
+          gh release view "$TAG" --json url,tagName,assets --jq '{url,tagName,assets:[.assets[].name]}'
