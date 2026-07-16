@@ -77,7 +77,7 @@ public partial class ChatWindow : Window
         AppendTimeIfNeeded(force: true);
         AppendBubble(
             _settings.PetName,
-            $"嗨，{_settings.PartnerName}～\n像微信一样随便聊就行。可以把图片/代码文件拖进窗口，点「＋」选择，或 Ctrl+V 粘贴；也可以点「看桌面」让我瞅一眼屏幕。\n断网也没关系，我会继续陪你。",
+            $"嗨，{_settings.PartnerName}～\n像微信一样随便聊就行。\n• 把文件拖进这个窗口（图片/代码/任意路径）\n• 点「＋」选择，或 Ctrl+V 粘贴截图\n• 点「看桌面」让我瞅屏幕\n断网也没关系，我会继续陪你。",
             isPet: true);
         InputBox.Focus();
     }
@@ -192,10 +192,118 @@ public partial class ChatWindow : Window
         AttachBar.Visibility = Visibility.Collapsed;
     }
 
-    // ---------- 拖拽文件到聊天窗口 ----------
+    // ---------- 拖拽文件到聊天窗口（Agent 附件） ----------
 
-    private static bool HasFileDrop(DragEventArgs e) =>
-        e.Data.GetDataPresent(DataFormats.FileDrop);
+    /// <summary>
+    /// 兼容 FileDrop / FileNameW / 单字符串路径；部分资源管理器只报 FileNameW。
+    /// </summary>
+    private static bool HasFileDrop(DragEventArgs e)
+    {
+        try
+        {
+            if (e.Data.GetDataPresent(DataFormats.FileDrop, autoConvert: true))
+                return true;
+            if (e.Data.GetDataPresent("FileDrop", autoConvert: true))
+                return true;
+            if (e.Data.GetDataPresent("FileNameW", autoConvert: true))
+                return true;
+            if (e.Data.GetDataPresent("FileName", autoConvert: true))
+                return true;
+        }
+        catch
+        {
+            // ignore
+        }
+
+        return false;
+    }
+
+    private static string[] ExtractDroppedPaths(DragEventArgs e)
+    {
+        var list = new List<string>();
+        try
+        {
+            if (e.Data.GetDataPresent(DataFormats.FileDrop, true))
+            {
+                switch (e.Data.GetData(DataFormats.FileDrop, true))
+                {
+                    case string[] arr:
+                        list.AddRange(arr);
+                        break;
+                    case string one when !string.IsNullOrWhiteSpace(one):
+                        list.Add(one);
+                        break;
+                }
+            }
+
+            // 部分 shell 只提供 FileNameW
+            if (list.Count == 0 && e.Data.GetDataPresent("FileNameW", true))
+            {
+                switch (e.Data.GetData("FileNameW", true))
+                {
+                    case string[] arr:
+                        list.AddRange(arr);
+                        break;
+                    case string one when !string.IsNullOrWhiteSpace(one):
+                        list.Add(one);
+                        break;
+                    case System.Collections.IEnumerable en:
+                        foreach (var o in en)
+                        {
+                            if (o is string s && !string.IsNullOrWhiteSpace(s))
+                                list.Add(s);
+                        }
+                        break;
+                }
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        return list
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Select(p => p.Trim().Trim('"'))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    /// <summary>
+    /// 文件夹：展开第一层文件（最多补到 6 个附件额度），不递归整树。
+    /// </summary>
+    private static IEnumerable<string> ExpandPathsForAttach(IEnumerable<string> paths)
+    {
+        foreach (var path in paths)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                continue;
+            if (File.Exists(path))
+            {
+                yield return path;
+                continue;
+            }
+
+            if (!Directory.Exists(path))
+                continue;
+
+            // 先 yield 标记：调用方看到目录会提示；同时给出子文件
+            yield return path;
+            string[] files;
+            try
+            {
+                files = Directory.GetFiles(path);
+            }
+            catch
+            {
+                continue;
+            }
+
+            Array.Sort(files, StringComparer.OrdinalIgnoreCase);
+            foreach (var f in files.Take(12))
+                yield return f;
+        }
+    }
 
     private void SetDropOverlay(bool visible)
     {
@@ -206,6 +314,7 @@ public partial class ChatWindow : Window
 
     private void Window_PreviewDragEnter(object sender, DragEventArgs e)
     {
+        // 必须 Handled=true，否则 TextBox 等子控件会盖掉 Effects，出现「禁止拖入」图标
         if (!HasFileDrop(e) || _busy || _loadingAttachments)
         {
             e.Effects = DragDropEffects.None;
@@ -239,7 +348,7 @@ public partial class ChatWindow : Window
         try
         {
             var pos = e.GetPosition(this);
-            if (pos.X < 0 || pos.Y < 0 || pos.X > ActualWidth || pos.Y > ActualHeight)
+            if (pos.X < 2 || pos.Y < 2 || pos.X > ActualWidth - 2 || pos.Y > ActualHeight - 2)
                 SetDropOverlay(false);
         }
         catch
@@ -253,26 +362,23 @@ public partial class ChatWindow : Window
     private async void Window_PreviewDrop(object sender, DragEventArgs e)
     {
         SetDropOverlay(false);
-        if (!HasFileDrop(e) || _busy || _loadingAttachments)
+        e.Effects = DragDropEffects.Copy;
+        e.Handled = true; // 阻止 TextBox 把路径当文本粘贴
+
+        if (_busy || _loadingAttachments)
         {
-            e.Handled = true;
+            AppendSystemTip("我还在忙/读附件中，稍后再拖文件进来～");
             return;
         }
 
-        string[]? paths = null;
-        try
+        var paths = ExtractDroppedPaths(e);
+        if (paths.Length == 0)
         {
-            paths = e.Data.GetData(DataFormats.FileDrop) as string[];
-        }
-        catch
-        {
-            // ignore
+            AppendSystemTip("没有识别到可拖入的文件，请从资源管理器拖文件（不是快捷方式碎片）。");
+            return;
         }
 
-        e.Effects = DragDropEffects.Copy;
-        e.Handled = true;
-        if (paths is { Length: > 0 })
-            await AddAttachmentPathsAsync(paths).ConfigureAwait(true);
+        await AddAttachmentPathsAsync(ExpandPathsForAttach(paths)).ConfigureAwait(true);
     }
 
     private async void AttachButton_Click(object sender, RoutedEventArgs e)
@@ -314,6 +420,8 @@ public partial class ChatWindow : Window
             return;
 
         var previousStatus = StatusText.Text;
+        var before = _pending.Count;
+        var folderHints = 0;
         _loadingAttachments = true;
         AttachButton.IsEnabled = false;
         SendButton.IsEnabled = false;
@@ -328,10 +436,21 @@ public partial class ChatWindow : Window
                     break;
                 }
 
-                // 文件夹：提示，不整树塞进附件
-                if (Directory.Exists(path))
+                // 文件夹：提示（Expand 可能已塞入子文件）；目录本身不当附件
+                if (Directory.Exists(path) && !File.Exists(path))
                 {
-                    AppendSystemTip($"「{Path.GetFileName(path)}」是文件夹，请拖入具体文件；或让我用工具列目录。");
+                    folderHints++;
+                    if (folderHints == 1)
+                    {
+                        AppendSystemTip(
+                            $"「{Path.GetFileName(path)}」是文件夹：已尝试添加其中文件；完整操作可让我说「列出这个目录」。");
+                    }
+                    continue;
+                }
+
+                if (!File.Exists(path))
+                {
+                    AppendSystemTip($"找不到文件：{path}");
                     continue;
                 }
 
@@ -356,8 +475,16 @@ public partial class ChatWindow : Window
                 RefreshAttachBar();
                 AttachButton.IsEnabled = !_busy;
                 SendButton.IsEnabled = !_busy || _cancelRequested;
-                if (StatusText.Text == "正在读取附件…")
+                var added = _pending.Count - before;
+                if (added > 0)
+                {
+                    StatusText.Text = $"已添加 {added} 个附件，可发送";
+                    AppendSystemTip($"✅ 已加入 {_pending.Count} 个待发送附件（点发送交给 Agent）。");
+                }
+                else if (StatusText.Text == "正在读取附件…")
+                {
                     StatusText.Text = string.IsNullOrWhiteSpace(previousStatus) ? "在线" : previousStatus;
+                }
             }
         }
     }
@@ -455,15 +582,16 @@ public partial class ChatWindow : Window
                 return new AttachmentLoadResult(null, "文件不存在或已被移动，已跳过。");
 
             var info = new FileInfo(path);
-            // 单文件上限 8MB，避免撑爆 API
+            // 单文件上限 8MB，避免撑爆 API（路径类附件也限制，防止误拖巨型 ISO）
             if (info.Length > 8 * 1024 * 1024)
                 return new AttachmentLoadResult(null, $"「{info.Name}」超过 8MB，已跳过。");
 
             var ext = info.Extension.ToLowerInvariant();
             var kind = ClassifyAttachment(ext);
+            var fullPath = info.FullName;
             var item = new PendingAttachment
             {
-                Path = path,
+                Path = fullPath,
                 FileName = info.Name,
                 Kind = kind,
                 MimeType = GuessMime(ext),
@@ -472,25 +600,33 @@ public partial class ChatWindow : Window
 
             if (kind == ChatAttachmentKind.Image)
             {
-                var original = File.ReadAllBytes(path);
+                var original = File.ReadAllBytes(fullPath);
                 // 所有图片统一解码并限到 1280px，防止小体积超大像素图耗尽内存。
                 var normalized = TryDownscaleImage(original);
                 item.ImageBytes = normalized ?? original;
                 if (normalized is not null)
                     item.MimeType = "image/jpeg";
-            }
-            else if (kind == ChatAttachmentKind.Text)
-            {
-                // 文本最多读 80KB，保证完整可读又不爆上下文
-                item.TextPreview = ReadTextFileLimited(path, maxChars: 80_000);
-            }
-            else
-            {
-                return new AttachmentLoadResult(
-                    null, $"「{info.Name}」类型暂不支持解析，可改发图片或文本/代码。");
+                return new AttachmentLoadResult(item, null);
             }
 
-            return new AttachmentLoadResult(item, null);
+            if (kind == ChatAttachmentKind.Text)
+            {
+                // 文本最多读 80KB，保证完整可读又不爆上下文
+                item.TextPreview = ReadTextFileLimited(fullPath, maxChars: 80_000);
+                return new AttachmentLoadResult(item, null);
+            }
+
+            // 其它类型：仍加入附件，只交本机绝对路径给 Agent（可用工具处理）
+            var pathOnly = new PendingAttachment
+            {
+                Path = fullPath,
+                FileName = info.Name,
+                Kind = ChatAttachmentKind.Other,
+                MimeType = "application/octet-stream",
+                SizeBytes = info.Length,
+            };
+            return new AttachmentLoadResult(
+                pathOnly, $"「{info.Name}」已作为本机路径交给 Agent（可用工具打开/读取/移动）。");
         }
         catch
         {
@@ -520,9 +656,12 @@ public partial class ChatWindow : Window
                 Margin = new Thickness(0, 0, 6, 4),
             };
             var sizeKb = Math.Max(1, item.SizeBytes / 1024);
-            var label = item.Kind == ChatAttachmentKind.Image
-                ? $"🖼 {item.FileName} · {sizeKb}KB"
-                : $"📄 {item.FileName} · {sizeKb}KB";
+            var label = item.Kind switch
+            {
+                ChatAttachmentKind.Image => $"🖼 {item.FileName} · {sizeKb}KB",
+                ChatAttachmentKind.Text => $"📄 {item.FileName} · {sizeKb}KB",
+                _ => $"📎 {item.FileName} · 路径",
+            };
             chip.Child = new TextBlock
             {
                 Text = label,
@@ -739,7 +878,8 @@ public partial class ChatWindow : Window
                 Kind: p.Kind,
                 MimeType: p.MimeType,
                 TextContent: p.TextPreview,
-                ImageBytes: p.ImageBytes));
+                ImageBytes: p.ImageBytes,
+                FullPath: p.Path));
         }
         return list;
     }

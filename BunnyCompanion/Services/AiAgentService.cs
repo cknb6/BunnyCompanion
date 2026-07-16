@@ -21,7 +21,9 @@ public sealed record ChatAttachment(
     ChatAttachmentKind Kind,
     string? MimeType,
     string? TextContent,
-    byte[]? ImageBytes);
+    byte[]? ImageBytes,
+    /// <summary>本机绝对路径（拖拽/选择文件时提供，便于 Agent 用工具读写）。</summary>
+    string? FullPath = null);
 
 public sealed record AgentResult(
     string Text,
@@ -103,6 +105,8 @@ public sealed class AiAgentService
         var attachList = attachments?.ToList() ?? [];
         var hasImageAttach = attachList.Any(a => a.Kind == ChatAttachmentKind.Image && a.ImageBytes is { Length: > 0 });
         var hasTextAttach = attachList.Any(a => a.Kind == ChatAttachmentKind.Text && !string.IsNullOrWhiteSpace(a.TextContent));
+        var hasPathAttach = attachList.Any(a =>
+            a.Kind == ChatAttachmentKind.Other && !string.IsNullOrWhiteSpace(a.FullPath));
 
         if (text.Length == 0)
         {
@@ -112,6 +116,8 @@ public sealed class AiAgentService
                 text = "看看我发的图，跟我说你看到了什么。";
             else if (hasTextAttach)
                 text = "看看我发的文件，帮我读一下并说说重点。";
+            else if (hasPathAttach)
+                text = "我拖了本机文件进来，请按路径用工具查看或处理，并告诉我结果。";
             else
                 text = "在吗";
         }
@@ -815,7 +821,7 @@ public sealed class AiAgentService
             return text;
 
         var sb = new StringBuilder();
-        sb.AppendLine(text);
+        sb.AppendLine(string.IsNullOrWhiteSpace(text) ? "请查看我拖进/发来的附件，按需处理。" : text);
         sb.AppendLine();
 
         var imageNames = attachments.Where(a => a.Kind == ChatAttachmentKind.Image).Select(a => a.FileName).ToList();
@@ -829,10 +835,28 @@ public sealed class AiAgentService
                 body = body[..AiConfig.MaxAttachmentTextChars] + "\n…（后文过长已截断）";
             sb.AppendLine();
             sb.AppendLine($"【附件文件：{a.FileName}】");
+            if (!string.IsNullOrWhiteSpace(a.FullPath))
+                sb.AppendLine($"本机路径：{a.FullPath}");
             sb.AppendLine("```");
             sb.AppendLine(body);
             sb.AppendLine("```");
             sb.AppendLine("请基于上述完整内容回答，不要说「看不到文件」。");
+        }
+
+        // 二进制/其它类型：只交路径，让 Agent 用 list_dir/read_file/open_path/move 等工具
+        foreach (var a in attachments.Where(x => x.Kind == ChatAttachmentKind.Other))
+        {
+            sb.AppendLine();
+            sb.AppendLine($"【本机文件附件：{a.FileName}】");
+            sb.AppendLine($"绝对路径：{a.FullPath ?? a.FileName}");
+            sb.AppendLine("正文未预读（可能是二进制）。请用工具 read_file / open_path / list_dir 等按用户意图处理，不要说「看不到文件」。");
+        }
+
+        // 图片也附上路径（若有），方便「把这张图挪到…」
+        foreach (var a in attachments.Where(x =>
+                     x.Kind == ChatAttachmentKind.Image && !string.IsNullOrWhiteSpace(x.FullPath)))
+        {
+            sb.AppendLine($"图片本机路径：{a.FullPath}（文件名 {a.FileName}）");
         }
 
         return sb.ToString().Trim();
