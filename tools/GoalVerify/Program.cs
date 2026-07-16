@@ -2,7 +2,7 @@ using BunnyCompanion.Engine;
 using BunnyCompanion.Models;
 using BunnyCompanion.Services;
 
-// 驱动交付源码的门禁自检（非 mock 再实现）
+// 直接驱动产品源码执行门禁自检（非 mock 再实现）
 var scratch = Environment.GetEnvironmentVariable("GOAL_SCRATCH")
               ?? Path.Combine(Path.GetTempPath(), "goal-verify-out");
 Directory.CreateDirectory(scratch);
@@ -234,47 +234,6 @@ void Fail(string msg)
     else Ok("FormatWeatherBroadcast 含气温与警示节");
 
     File.WriteAllText(Path.Combine(scratch, "weather.txt"), broadcast + "\n---\nhot=" + string.Join("|", hot) + "\nrain=" + string.Join("|", rain) + "\n");
-}
-
-// ---------- 5) 文档作者字段存在（静态） ----------
-{
-    var root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
-    // tools/GoalVerify/bin/Release/net8.0 → 上溯到仓库根不稳定，改用环境或相对
-    var candidates = new[]
-    {
-        Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory())),
-        Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "..")),
-        Path.GetFullPath(Path.Combine(Directory.GetCurrentDirectory(), "..", "..")),
-    };
-    string? agents = null;
-    foreach (var c in candidates)
-    {
-        var p = Path.Combine(c, "AGENTS.md");
-        if (File.Exists(p)) { agents = p; break; }
-        p = Path.Combine(c, "BunnyCompanion", "AGENTS.md");
-        if (File.Exists(p)) { agents = Path.GetDirectoryName(p) is { } d ? Path.Combine(d, "AGENTS.md") : p; break; }
-    }
-    // 再试仓库固定相对：从 compile link 所在
-    if (agents is null)
-    {
-        var walk = new DirectoryInfo(Directory.GetCurrentDirectory());
-        for (var i = 0; i < 8 && walk is not null; i++, walk = walk.Parent)
-        {
-            var p = Path.Combine(walk.FullName, "AGENTS.md");
-            if (File.Exists(p)) { agents = p; break; }
-        }
-    }
-
-    if (agents is null || !File.Exists(agents))
-        Fail("AGENTS.md 未找到");
-    else
-    {
-        var text = File.ReadAllText(agents);
-        if (!text.Contains("1837620622", StringComparison.Ordinal)) Fail("AGENTS 缺 GitHub 作者号");
-        else if (!text.Contains("2040168455@qq.com", StringComparison.Ordinal)) Fail("AGENTS 缺交付邮箱");
-        else Ok("AGENTS.md 作者字段齐备 path=" + agents);
-        File.WriteAllText(Path.Combine(scratch, "docs-author.txt"), agents + "\nlen=" + text.Length + "\n");
-    }
 }
 
 Console.WriteLine(fails == 0 ? "ALL_PASS" : $"FAILURES={fails}");

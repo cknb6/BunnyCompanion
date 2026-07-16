@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -145,17 +146,82 @@ def validate_portability() -> None:
         fail("项目不应依赖外部 NuGet 包")
 
 
+def validate_public_tree() -> None:
+    """阻止本地交接资料和美术生产中间件再次进入公开源码包。"""
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exception:
+        fail(f"无法读取 Git 跟踪文件清单：{exception}")
+        return
+
+    tracked = {
+        item.decode("utf-8").replace("\\", "/")
+        for item in result.stdout.split(b"\0")
+        if item
+    }
+    forbidden_names = {
+        "agents.md", "claude.md", "codex.md", "handoff.md",
+        "security_audit.md", "coderabbit_review.md",
+    }
+    forbidden_exact = {
+        "发布前检查清单.md",
+        "隐私与私人使用说明.txt",
+        "Artwork/README.md",
+        "Artwork/生成提示词.md",
+        "Artwork/sprite_manifest.json",
+        "tools/split_sprites.py",
+        *(f"Artwork/Screenshots/demo-{index:02d}.png" for index in range(5, 10)),
+    }
+    forbidden_prefixes = (
+        ".agents/", ".claude/", ".codex/",
+        "Artwork/ChromaSheets/", "Artwork/TransparentSheets/",
+    )
+
+    for path in sorted(tracked):
+        parts = path.split("/")
+        if parts[-1].lower() in forbidden_names:
+            fail(f"公开源码包含本地 Agent/交接文件：{path}")
+        if path in forbidden_exact or path.startswith(forbidden_prefixes):
+            fail(f"公开源码包含内部交付或生产文件：{path}")
+        if any(part.lower() in {".agents", ".claude", ".codex"} for part in parts):
+            fail(f"公开源码包含本地 Agent 配置目录：{path}")
+
+    public_text_files = [
+        ROOT / "README.md",
+        ROOT / "使用说明.txt",
+        ROOT / ".github" / "workflows" / "build-windows.yml",
+    ]
+    internal_markers = (
+        "Actions 额度不足", "提交邮箱（绿点）", "打包账号：",
+        "GitHub 大号", "GitHub 小号", "step-3.7", "OpenRouter",
+    )
+    for path in public_text_files:
+        if not path.exists():
+            fail(f"公开说明文件缺失：{path.relative_to(ROOT)}")
+            continue
+        content = path.read_text(encoding="utf-8")
+        for marker in internal_markers:
+            if marker in content:
+                fail(f"公开说明包含内部运营或接口信息：{path.relative_to(ROOT)} -> {marker}")
+
+
 def main() -> int:
     validate_xml()
     validate_event_handlers()
     validate_sprites()
     validate_portability()
+    validate_public_tree()
     if ERRORS:
         print("验证失败：")
         for error in ERRORS:
             print(f"- {error}")
         return 1
-    print("验证通过：XML、XAML 事件、48 个透明精灵、动作引用和路径可移植性均正常。")
+    print("验证通过：XML、XAML 事件、48 个透明精灵、动作引用、路径可移植性和公开发布树均正常。")
     return 0
 
 

@@ -31,6 +31,30 @@ __pycache__/
 packages/
 *.nupkg
 
-# 本地冗余文档（内容已并入 README，仓库不跟踪，本地保留）
+# 本地 Agent / 交接资料（仅在开发机保留，不进入公开源码包）
+**/AGENTS.md
+**/CLAUDE.md
+**/CODEX.md
+**/HANDOFF.md
+**/.agents/
+**/.claude/
+**/.codex/
+
+# 私有交付与审计记录
 发布前检查清单.md
 隐私与私人使用说明.txt
+
+# 美术生产中间文件（程序运行只使用 BunnyCompanion/Assets/Sprites）
+/Artwork/README.md
+/Artwork/生成提示词.md
+/Artwork/ChromaSheets/
+/Artwork/TransparentSheets/
+/Artwork/sprite_manifest.json
+/tools/split_sprites.py
+
+# 含旧接口标识或开发机环境的历史截图（本地留档）
+/Artwork/Screenshots/demo-05.png
+/Artwork/Screenshots/demo-06.png
+/Artwork/Screenshots/demo-07.png
+/Artwork/Screenshots/demo-08.png
+/Artwork/Screenshots/demo-09.png

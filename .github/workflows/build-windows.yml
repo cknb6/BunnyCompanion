@@ -163,8 +163,7 @@ jobs:
           不确定时优先 **x64**。
 
           ### 开发者
-          **本软件由传康KK开发。**  
-          打包账号：cknb6（Actions）；开发者大号：1837620622。
+          **本软件由传康KK开发。**
 
           提交：\`${{ github.sha }}\`
           Run：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

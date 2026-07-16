@@ -1,7 +1,7 @@
 using BunnyCompanion.Models;
 using BunnyCompanion.Services;
 
-// 驱动已交付的 ChatReplyService.Reply（真实源文件链接编译），禁止复刻逻辑。
+// 驱动产品中的 ChatReplyService.Reply（真实源文件链接编译），禁止复刻逻辑。
 var settings = new PetSettings { PartnerName = "宝宝", PetName = "小申" };
 var samples = new[]
 {

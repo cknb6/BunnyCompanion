@@ -29,14 +29,10 @@ public static class AppCredits
     public const string DevelopedByLine = "本软件由传康KK开发";
 
     public const string WeChat = "1837620622";
-    /// <summary>交付/咨询邮箱（非 GitHub 提交邮箱）。</summary>
+    /// <summary>用户咨询邮箱。</summary>
     public const string ContactEmail = "2040168455@qq.com";
     public const string Platforms = "咸鱼 / B站：万能程序员";
-    /// <summary>开发者大号（GitHub 身份 / 绿点）。</summary>
-    public const string GitHubMainUser = "1837620622";
-    /// <summary>打包发布小号（Actions 额度，仓库托管 cknb6）。</summary>
-    public const string GitHubBuildUser = "cknb6";
-    public const string GitHubUser = GitHubMainUser;
+    public const string GitHubUser = "1837620622";
 
     public static string AboutBody(int days, int interactions, int affection) =>
         $"""
@@ -44,7 +40,7 @@ public static class AppCredits
 
         {DevelopedByLine}
         开发者：{Developer} / {DeveloperAlias}
-        GitHub：{GitHubMainUser}（大号）· 构建发布：{GitHubBuildUser}
+        GitHub：{GitHubUser}
 
         已经陪伴 {days} 天
         互动 {interactions} 次 · 爱心值 {affection}
