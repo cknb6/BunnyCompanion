@@ -144,9 +144,17 @@ public sealed class AiAgentService
         foreach (var attachment in attachList.Where(a =>
                      a.Kind == ChatAttachmentKind.Image && a.ImageBytes is { Length: > 0 }))
         {
-            images.Add(new ImageInput(
-                attachment.ImageBytes!,
-                NormalizeImageMime(attachment.MimeType, attachment.ImageBytes!)));
+            if (images.Count >= AiConfig.MaxImageAttachments)
+                break;
+            var bytes = attachment.ImageBytes!;
+            // 超大图再压一轮，避免 Step 多模态超时/拒识
+            if (bytes.Length > AiConfig.MaxImageBytesSoft)
+            {
+                // 已在 UI 侧限到 1280；此处仅丢弃极端超大，保接口稳定
+                continue;
+            }
+
+            images.Add(new ImageInput(bytes, NormalizeImageMime(attachment.MimeType, bytes)));
         }
 
         var pendingUserTurn = new ChatTurn("user", composedUser);
@@ -336,6 +344,8 @@ public sealed class AiAgentService
             var messages = BuildInitialMessages(systemPrompt, history, images);
             var tools = enableTools ? WindowsAgentToolkit.BuildToolDefinitions() : null;
             var emptyContentRetries = 0;
+            var emptyAfterToolsRetries = 0;
+            List<string>? lastToolResults = null;
 
             for (var round = 0; round < AiConfig.MaxToolRounds; round++)
             {
@@ -350,6 +360,9 @@ public sealed class AiAgentService
                 {
                     payload["tools"] = tools.DeepClone();
                     payload["tool_choice"] = "auto";
+                    // Step Plan / OpenAI 兼容：允许多工具并行，减少往返
+                    if (!openRouter)
+                        payload["parallel_tool_calls"] = true;
                 }
 
                 extra?.Invoke(payload);
@@ -379,6 +392,7 @@ public sealed class AiAgentService
                     return null;
 
                 // 有 tool_calls（官方 JSON 或正文里伪 XML）：执行并回灌
+                // Step 在 finish_reason=tool_calls 时 content 经常为空字符串，这是正常现象，不能当失败。
                 if (enableTools && parsed.ToolCalls is { Count: > 0 })
                 {
                     var fromPseudo = parsed.ToolCallsFromContent;
@@ -394,12 +408,13 @@ public sealed class AiAgentService
                         toolTrace.Add(call.Name);
                         var argsObj = ParseToolArgs(call.ArgumentsJson);
                         NormalizeZodiacArgs(argsObj);
+                        NormalizePathArgs(call.Name, argsObj);
 
                         var result = await WindowsAgentToolkit.ExecuteAsync(call.Name, argsObj, cancellationToken)
                             .ConfigureAwait(false);
                         if (result.Length > AiConfig.MaxToolResultChars)
                             result = result[..AiConfig.MaxToolResultChars] + "\n…(工具输出截断)";
-                        toolResults.Add(result);
+                        toolResults.Add($"【{call.Name}】\n{result}");
 
                         messages.Add(new JsonObject
                         {
@@ -410,20 +425,24 @@ public sealed class AiAgentService
                         });
                     }
 
+                    lastToolResults = toolResults;
+
+                    // 确定性本地工具 + 正文几乎全是伪 XML：直接回结果，避免再调模型胡写
                     if (fromPseudo && toolResults.Count > 0 && LooksLikeOnlyToolMarkup(parsed.Content)
                         && parsed.ToolCalls.All(c => IsDeterministicLocalTool(c.Name)))
                     {
                         return new LoopHit(string.Join("\n\n", toolResults), providerLabel);
                     }
 
-                    if (fromPseudo)
+                    // 官方 tool_calls 或伪调用后都加一句约束，强制中文总结、禁止再吐标签
+                    messages.Add(new JsonObject
                     {
-                        messages.Add(new JsonObject
-                        {
-                            ["role"] = "user",
-                            ["content"] = "上面工具结果已经给你了。请用温柔中文直接回答用户，禁止再输出 <tool_call>、<function> 等任何标签或 XML。",
-                        });
-                    }
+                        ["role"] = "user",
+                        ["content"] =
+                            "工具结果已全部给你。请用温柔简体中文直接回答用户：" +
+                            "总结要点、说明已做了什么；禁止输出 <tool_call>、<function>、XML 或 JSON 伪代码；" +
+                            "不要重复工具原始日志，改成口语。",
+                    });
 
                     continue;
                 }
@@ -432,11 +451,35 @@ public sealed class AiAgentService
                 {
                     var cleaned = StripToolMarkup(parsed.Content);
                     if (string.IsNullOrWhiteSpace(cleaned))
+                    {
+                        // 清洗后变空：若刚跑过工具，用工具结果兜底，勿整链失败
+                        if (lastToolResults is { Count: > 0 })
+                            return new LoopHit(FormatToolResultsFallback(lastToolResults), providerLabel);
                         return null;
+                    }
+
                     return new LoopHit(cleaned, providerLabel);
                 }
 
-                // content 空：finish_reason=length 时加 token 再试一次；否则立刻失败，禁止空转
+                // content 空 + 已有工具结果：再催一轮总结；仍空则本地拼装结果（绝不判「API 没调」）
+                if (lastToolResults is { Count: > 0 })
+                {
+                    if (emptyAfterToolsRetries < 1)
+                    {
+                        emptyAfterToolsRetries++;
+                        messages.Add(new JsonObject
+                        {
+                            ["role"] = "user",
+                            ["content"] = "请只输出给用户看的最终中文回答，不要空回复，不要工具标签。",
+                        });
+                        progress?.Report("工具已跑完，正在整理回答…");
+                        continue;
+                    }
+
+                    return new LoopHit(FormatToolResultsFallback(lastToolResults), providerLabel);
+                }
+
+                // content 空：finish_reason=length 时加 token 再试一次
                 if (string.Equals(parsed.FinishReason, "length", StringComparison.OrdinalIgnoreCase)
                     && emptyContentRetries < 1)
                 {
@@ -446,8 +489,19 @@ public sealed class AiAgentService
                     continue;
                 }
 
+                // 仍无正文：尝试从 reasoning 里抽最后一句可读中文（弱兜底）
+                if (!string.IsNullOrWhiteSpace(parsed.ReasoningHint))
+                {
+                    var hint = TryExtractReadableReplyFromReasoning(parsed.ReasoningHint);
+                    if (!string.IsNullOrWhiteSpace(hint))
+                        return new LoopHit(hint!, providerLabel);
+                }
+
                 return null;
             }
+
+            if (lastToolResults is { Count: > 0 })
+                return new LoopHit(FormatToolResultsFallback(lastToolResults), providerLabel);
 
             return new LoopHit("工具步骤有点多，我先停一下～你再说具体一点目标，我继续帮你弄。", providerLabel);
         }
@@ -459,19 +513,108 @@ public sealed class AiAgentService
         {
             throw;
         }
-        catch
+        catch (Exception ex)
         {
+            progress?.Report($"{providerLabel} 异常…");
+            System.Diagnostics.Debug.WriteLine($"Agent loop fail [{providerLabel}]: {ex.Message}");
             return null;
         }
     }
 
-    /// <summary>回灌历史时去掉 reasoning 字段，避免下一轮上下文膨胀拖慢。</summary>
+    /// <summary>回灌历史时去掉 reasoning，且 tool_calls 时 content 空串改 null（Step 更稳）。</summary>
     private static JsonObject SanitizeAssistantMessageForHistory(JsonObject raw)
     {
         var clone = raw.DeepClone() as JsonObject ?? new JsonObject { ["role"] = "assistant" };
         clone.Remove("reasoning");
         clone.Remove("reasoning_content");
+        if (clone["tool_calls"] is not null)
+        {
+            var c = clone["content"]?.ToString();
+            if (string.IsNullOrWhiteSpace(c) || c is "null" or "\"\"")
+                clone["content"] = null;
+        }
+
         return clone;
+    }
+
+    private static string FormatToolResultsFallback(IReadOnlyList<string> toolResults)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("我已经帮你查/做完啦，结果如下：");
+        sb.AppendLine();
+        foreach (var r in toolResults.Take(6))
+            sb.AppendLine(r.Length > 1200 ? r[..1200] + "…" : r);
+        sb.AppendLine();
+        sb.Append("还有要继续弄的直接说～");
+        return sb.ToString().Trim();
+    }
+
+    /// <summary>弱兜底：从 reasoning 文本里抓引号内或末尾短句，避免完全空回复。</summary>
+    private static string? TryExtractReadableReplyFromReasoning(string reasoning)
+    {
+        if (string.IsNullOrWhiteSpace(reasoning))
+            return null;
+        // 优先取中文引号内容
+        var m = Regex.Match(reasoning, "[「\"“]([^」\"”]{4,80})[」\"”]");
+        if (m.Success)
+            return m.Groups[1].Value.Trim();
+        // 末尾像完整句的中文
+        m = Regex.Match(reasoning, @"([\u4e00-\u9fff][^。！？\n]{6,60}[。！？])\s*$");
+        if (m.Success)
+            return m.Groups[1].Value.Trim();
+        return null;
+    }
+
+    /// <summary>规范化路径类工具参数（空 path、~/Desktop 等）。</summary>
+    private static void NormalizePathArgs(string toolName, JsonObject args)
+    {
+        static void Fix(JsonObject a, string key)
+        {
+            if (!a.ContainsKey(key))
+                return;
+            var v = a[key]?.ToString()?.Trim().Trim('"');
+            if (string.IsNullOrWhiteSpace(v))
+            {
+                if (key is "path" or "root")
+                    a[key] = "桌面";
+                return;
+            }
+
+            // 模型常写 ~/Desktop、~/Documents
+            if (v.StartsWith("~/Desktop", StringComparison.OrdinalIgnoreCase)
+                || v.Equals("~\\Desktop", StringComparison.OrdinalIgnoreCase)
+                || v.Equals("~/桌面", StringComparison.OrdinalIgnoreCase))
+                a[key] = "桌面";
+            else if (v.StartsWith("~/Documents", StringComparison.OrdinalIgnoreCase)
+                     || v.StartsWith("~/文档", StringComparison.OrdinalIgnoreCase))
+                a[key] = "文档";
+            else if (v.StartsWith("~/Downloads", StringComparison.OrdinalIgnoreCase)
+                     || v.StartsWith("~/下载", StringComparison.OrdinalIgnoreCase))
+                a[key] = "下载";
+            else if (v is "~" or "~/" or "~\\")
+                a[key] = "用户目录";
+        }
+
+        switch (toolName)
+        {
+            case "list_dir":
+            case "read_file":
+            case "write_file":
+            case "append_file":
+            case "delete_path":
+            case "open_path":
+            case "create_directory":
+                Fix(args, "path");
+                break;
+            case "search_files":
+                Fix(args, "root");
+                break;
+            case "move_path":
+            case "copy_path":
+                Fix(args, "source");
+                Fix(args, "destination");
+                break;
+        }
     }
 
     private sealed record ToolCall(string Id, string Name, string ArgumentsJson);
@@ -481,7 +624,8 @@ public sealed class AiAgentService
         IReadOnlyList<ToolCall>? ToolCalls,
         JsonObject RawAssistantMessage,
         bool ToolCallsFromContent = false,
-        string? FinishReason = null);
+        string? FinishReason = null,
+        string? ReasoningHint = null);
 
     private static ParsedAssistant? ParseAssistantMessage(string json)
     {
@@ -489,6 +633,16 @@ public sealed class AiAgentService
         {
             using var document = JsonDocument.Parse(json);
             var root = document.RootElement;
+            // 明确错误体（Step 有时 200 外也会包 error）
+            if (root.TryGetProperty("error", out var errNode))
+            {
+                var msg = errNode.ValueKind == JsonValueKind.Object && errNode.TryGetProperty("message", out var em)
+                    ? em.GetString()
+                    : errNode.ToString();
+                System.Diagnostics.Debug.WriteLine("API error body: " + msg);
+                return null;
+            }
+
             if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
                 return null;
 
@@ -502,7 +656,8 @@ public sealed class AiAgentService
                 raw["role"] = "assistant";
 
             string? content = null;
-            if (message.TryGetProperty("content", out var contentElement))
+            if (message.TryGetProperty("content", out var contentElement)
+                && contentElement.ValueKind != JsonValueKind.Null)
             {
                 if (contentElement.ValueKind == JsonValueKind.String)
                     content = contentElement.GetString();
@@ -513,11 +668,22 @@ public sealed class AiAgentService
                     {
                         if (part.TryGetProperty("text", out var t))
                             sb.Append(t.GetString());
+                        // 部分多模态返回 type=text
+                        else if (part.TryGetProperty("type", out var ty)
+                                 && ty.GetString() == "text"
+                                 && part.TryGetProperty("text", out var t2))
+                            sb.Append(t2.GetString());
                     }
 
                     content = sb.ToString();
                 }
             }
+
+            string? reasoningHint = null;
+            if (message.TryGetProperty("reasoning", out var rs) && rs.ValueKind == JsonValueKind.String)
+                reasoningHint = rs.GetString();
+            else if (message.TryGetProperty("reasoning_content", out var rc) && rc.ValueKind == JsonValueKind.String)
+                reasoningHint = rc.GetString();
 
             List<ToolCall>? calls = null;
             var fromContent = false;
@@ -556,7 +722,10 @@ public sealed class AiAgentService
             if (calls is { Count: 0 })
                 calls = null;
 
-            return new ParsedAssistant(content?.Trim(), calls, raw, fromContent, finishReason);
+            // 空串 content 统一当 null，避免后续 IsNullOrWhiteSpace 误判路径不一致
+            content = string.IsNullOrWhiteSpace(content) ? null : content.Trim();
+
+            return new ParsedAssistant(content, calls, raw, fromContent, finishReason, reasoningHint);
         }
         catch
         {

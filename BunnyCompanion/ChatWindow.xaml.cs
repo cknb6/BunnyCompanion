@@ -436,6 +436,14 @@ public partial class ChatWindow : Window
                     break;
                 }
 
+                // 图片张数软限制（与多模态 API 一致）
+                if (ClassifyAttachment(Path.GetExtension(path).ToLowerInvariant()) == ChatAttachmentKind.Image
+                    && _pending.Count(p => p.Kind == ChatAttachmentKind.Image) >= 4)
+                {
+                    AppendSystemTip("图片最多 4 张，其余图片已跳过（文本/其它文件仍可加）。");
+                    continue;
+                }
+
                 // 文件夹：提示（Expand 可能已塞入子文件）；目录本身不当附件
                 if (Directory.Exists(path) && !File.Exists(path))
                 {

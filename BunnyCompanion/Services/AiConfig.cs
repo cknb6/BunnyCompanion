@@ -54,6 +54,10 @@ internal static class AiConfig
     public const int MaxHistoryMessages = 20;
     public const int MaxReplyChars = 12000;
     public const int MaxAttachmentTextChars = 60000;
+    /// <summary>单次对话最多图片附件张数（多模态上下文）。</summary>
+    public const int MaxImageAttachments = 4;
+    /// <summary>单张图片压缩后软上限（字节），过大则再压 JPEG 质量。</summary>
+    public const int MaxImageBytesSoft = 1_200_000;
     /// <summary>工具往返轮数（过大只会拖慢）。</summary>
     public const int MaxToolRounds = 6;
     public const int MaxToolResultChars = 12000;
