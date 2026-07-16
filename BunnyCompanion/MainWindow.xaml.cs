@@ -32,8 +32,10 @@ public partial class MainWindow : Window
     private HotkeyService? _hotkeys;
     private readonly Dictionary<string, BitmapImage> _spriteCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, byte[]> _alphaCache = new(StringComparer.OrdinalIgnoreCase);
-    private readonly DispatcherTimer _actionTimer = new();
-    private readonly DispatcherTimer _movementTimer = new() { Interval = TimeSpan.FromMilliseconds(33) };
+    /// <summary>固定 16ms 心跳，用累计时间推进帧，避免 Interval 每帧改写导致走路「抽」。</summary>
+    private readonly DispatcherTimer _actionTimer = new() { Interval = TimeSpan.FromMilliseconds(16) };
+    /// <summary>位移 16ms 一拍，步长更小，平移更顺滑。</summary>
+    private readonly DispatcherTimer _movementTimer = new() { Interval = TimeSpan.FromMilliseconds(16) };
     private readonly DispatcherTimer _behaviorTimer = new() { Interval = TimeSpan.FromSeconds(9) };
     private readonly DispatcherTimer _bubbleTimer = new();
     private readonly DispatcherTimer _reminderTimer = new() { Interval = TimeSpan.FromSeconds(30) };
@@ -48,10 +50,13 @@ public partial class MainWindow : Window
     private PetActionDefinition _currentAction = PetActionCatalog.Get("idle");
     private string _currentActionKey = "idle";
     private int _frameIndex;
+    /// <summary>当前帧结束的 UTC 时刻（时间轴推进，抗 Dispatcher 抖动）。</summary>
+    private DateTime _frameDeadlineUtc = DateTime.MinValue;
     private Action? _actionCompleted;
     private bool _isWalking;
     private int _walkDirection = 1;
     private DateTime _walkUntil;
+    private string? _lastDisplayedSprite;
     private bool _isDragging;
     private bool _dragMoved;
     private int _mouseDownClickCount;
@@ -125,6 +130,20 @@ public partial class MainWindow : Window
         _focusTimer.Tick += FocusTimer_Tick;
         _inputHealTimer.Tick += InputHealTimer_Tick;
         _systemTriggerTimer.Tick += SystemTriggerTimer_Tick;
+
+        // 预加载全部精灵，避免第一次走路/表情时磁盘解码造成卡顿
+        try
+        {
+            foreach (var action in PetActionCatalog.All.Values)
+            {
+                foreach (var frame in action.Frames)
+                    LoadSprite(frame.Sprite);
+            }
+        }
+        catch
+        {
+            // 预加载失败不阻断启动
+        }
     }
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -398,11 +417,22 @@ public partial class MainWindow : Window
         if (_isWalking && !key.Equals("walk", StringComparison.OrdinalIgnoreCase))
             StopWalking(recover: false);
 
+        // 同动作循环中不要反复 Play 重置到第 0 帧，否则 idle/walk 会「抽一下」
+        if (string.Equals(_currentActionKey, key, StringComparison.OrdinalIgnoreCase)
+            && _currentAction.Loop
+            && completed is null
+            && exclusiveSeconds <= 0
+            && _actionTimer.IsEnabled)
+        {
+            return;
+        }
+
         _currentActionKey = key;
         _currentAction = PetActionCatalog.Get(key);
         _actionCompleted = completed;
         _frameIndex = 0;
-        _actionTimer.Stop();
+        _lastDisplayedSprite = null;
+        StopSpriteAnimations();
 
         // 自动互斥：非循环待机类动作按帧时长独占，避免走路/喝水/比心互相打断。
         var autoExclusive = 0.0;
@@ -412,27 +442,57 @@ public partial class MainWindow : Window
             && !key.Equals("focus", StringComparison.OrdinalIgnoreCase)
             && !key.Equals("dragged", StringComparison.OrdinalIgnoreCase))
         {
-            autoExclusive = _currentAction.Frames.Sum(f => f.DurationMilliseconds) / 1000.0 + 0.2;
+            autoExclusive = _currentAction.Frames.Sum(f => f.DurationMilliseconds) / 1000.0 + 0.25;
         }
         var exclusive = Math.Max(exclusiveSeconds, autoExclusive);
         if (exclusive > 0)
             _exclusiveUntil = DateTime.Now.AddSeconds(exclusive);
 
-        DisplayCurrentFrame();
+        var firstMs = Math.Max(50, _currentAction.Frames[0].DurationMilliseconds);
+        _frameDeadlineUtc = DateTime.UtcNow.AddMilliseconds(firstMs);
+        DisplayCurrentFrame(advanceOnly: false);
         if (IsPetVisibleActive)
             _actionTimer.Start();
     }
 
-    private void DisplayCurrentFrame()
+    /// <param name="advanceOnly">true 时仅换图，不重设变换动画（循环帧推进用）。</param>
+    private void DisplayCurrentFrame(bool advanceOnly = false)
     {
+        if (_currentAction.Frames.Count == 0)
+            return;
+
+        _frameIndex = Math.Clamp(_frameIndex, 0, _currentAction.Frames.Count - 1);
         var frame = _currentAction.Frames[_frameIndex];
         _currentSpriteName = frame.Sprite;
-        PetImage.Source = LoadSprite(frame.Sprite);
-        _actionTimer.Interval = TimeSpan.FromMilliseconds(Math.Max(60, frame.DurationMilliseconds));
-        if (IsPetVisibleActive)
-            AnimateSprite(frame.Sprite);
-        else
+
+        // 同一精灵不要重复赋 Source，减少 WPF 重绘抖动
+        if (!string.Equals(_lastDisplayedSprite, frame.Sprite, StringComparison.OrdinalIgnoreCase))
+        {
+            PetImage.Source = LoadSprite(frame.Sprite);
+            _lastDisplayedSprite = frame.Sprite;
+        }
+
+        if (!IsPetVisibleActive)
+        {
             StopSpriteAnimations();
+            return;
+        }
+
+        // 走路：轻微点头感，与步伐同步；不跑会打断循环的 BeginAnimation
+        if (_isWalking || string.Equals(_currentActionKey, "walk", StringComparison.OrdinalIgnoreCase))
+        {
+            // walk_2 为过渡拍，略抬；1/3 落地
+            var bob = (_frameIndex is 1 or 3) ? -1.2 * _settings.Scale : 0;
+            MotionTransform.BeginAnimation(TranslateTransform.YProperty, null);
+            MotionTransform.Y = bob;
+            TiltTransform.BeginAnimation(RotateTransform.AngleProperty, null);
+            // 面向方向轻倾 1°，增强行走感且不抽
+            TiltTransform.Angle = -1.2 * _walkDirection;
+            return;
+        }
+
+        if (!advanceOnly)
+            AnimateSprite(frame.Sprite);
     }
 
     private void StopSpriteAnimations()
@@ -683,54 +743,98 @@ public partial class MainWindow : Window
             return;
         }
 
+        // 走路/拖拽循环不要每帧 Stop+Begin，否则和位移抢变换会「抽」
+        if (sprite.StartsWith("walk_", StringComparison.OrdinalIgnoreCase)
+            || sprite is "dragged")
+        {
+            if (sprite == "dragged")
+                TiltTransform.Angle = -7 * Math.Sign(FacingTransform.ScaleX == 0 ? 1 : FacingTransform.ScaleX);
+            return;
+        }
+
         StopSpriteAnimations();
 
         if (sprite is "breathe" or "headpat")
         {
             MotionTransform.BeginAnimation(TranslateTransform.YProperty,
-                new DoubleAnimation(0, -4 * _settings.Scale, TimeSpan.FromMilliseconds(330))
-                { AutoReverse = true });
+                new DoubleAnimation(0, -3.5 * _settings.Scale, TimeSpan.FromMilliseconds(360))
+                {
+                    AutoReverse = true,
+                    EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut },
+                });
         }
         else if (sprite == "jump")
         {
             MotionTransform.BeginAnimation(TranslateTransform.YProperty,
-                new DoubleAnimation(0, -13 * _settings.Scale, TimeSpan.FromMilliseconds(230))
-                { AutoReverse = true, EasingFunction = new SineEase() });
+                new DoubleAnimation(0, -13 * _settings.Scale, TimeSpan.FromMilliseconds(240))
+                {
+                    AutoReverse = true,
+                    EasingFunction = new SineEase { EasingMode = EasingMode.EaseOut },
+                });
         }
-        else if (sprite is "dance" or "music")
+        else if (sprite is "dance" or "music" or "tiptoe")
         {
             TiltTransform.BeginAnimation(RotateTransform.AngleProperty,
-                new DoubleAnimation(-3, 3, TimeSpan.FromMilliseconds(240))
-                { AutoReverse = true, RepeatBehavior = new RepeatBehavior(2) });
+                new DoubleAnimation(-2.5, 2.5, TimeSpan.FromMilliseconds(280))
+                {
+                    AutoReverse = true,
+                    RepeatBehavior = new RepeatBehavior(2),
+                    EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut },
+                });
         }
-        else if (sprite == "dragged")
+        else if (sprite is "wave" or "clap" or "celebrate")
         {
-            TiltTransform.Angle = -7 * _walkDirection;
+            TiltTransform.BeginAnimation(RotateTransform.AngleProperty,
+                new DoubleAnimation(0, 4, TimeSpan.FromMilliseconds(200))
+                {
+                    AutoReverse = true,
+                    EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut },
+                });
         }
     }
 
     private void ActionTimer_Tick(object? sender, EventArgs e)
     {
-        _frameIndex++;
-        if (_frameIndex >= _currentAction.Frames.Count)
+        if (!IsPetVisibleActive || _currentAction.Frames.Count == 0)
+            return;
+
+        // 未到截止：不切帧（16ms 心跳只做时间检查）
+        if (DateTime.UtcNow < _frameDeadlineUtc)
+            return;
+
+        // 落后时最多追 3 帧，避免一次跳太远
+        var guard = 0;
+        while (DateTime.UtcNow >= _frameDeadlineUtc && guard++ < 3)
         {
-            if (_currentAction.Loop)
+            _frameIndex++;
+            if (_frameIndex >= _currentAction.Frames.Count)
             {
-                _frameIndex = 0;
-            }
-            else
-            {
-                _actionTimer.Stop();
-                var callback = _actionCompleted;
-                _actionCompleted = null;
-                if (callback is not null)
-                    callback();
+                if (_currentAction.Loop)
+                {
+                    _frameIndex = 0;
+                }
                 else
-                    ReturnToAmbientAction();
-                return;
+                {
+                    _actionTimer.Stop();
+                    var callback = _actionCompleted;
+                    _actionCompleted = null;
+                    if (callback is not null)
+                        callback();
+                    else
+                        ReturnToAmbientAction();
+                    return;
+                }
             }
+
+            var dur = Math.Max(50, _currentAction.Frames[_frameIndex].DurationMilliseconds);
+            // 以「计划截止 + 时长」累加，而不是 Now+时长，减少累计漂移
+            if (_frameDeadlineUtc < DateTime.UtcNow - TimeSpan.FromMilliseconds(dur * 2))
+                _frameDeadlineUtc = DateTime.UtcNow.AddMilliseconds(dur);
+            else
+                _frameDeadlineUtc = _frameDeadlineUtc.AddMilliseconds(dur);
         }
-        DisplayCurrentFrame();
+
+        DisplayCurrentFrame(advanceOnly: true);
     }
 
     private void ReturnToAmbientAction()
@@ -783,6 +887,11 @@ public partial class MainWindow : Window
             return;
         _isWalking = false;
         _movementTimer.Stop();
+        // 收步时清掉行走 bob/倾角，避免接下一个动作时残影抽动
+        MotionTransform.BeginAnimation(TranslateTransform.YProperty, null);
+        TiltTransform.BeginAnimation(RotateTransform.AngleProperty, null);
+        MotionTransform.Y = 0;
+        TiltTransform.Angle = 0;
         if (recover)
             PlayAction("recover");
     }
@@ -793,7 +902,8 @@ public partial class MainWindow : Window
             return;
 
         var area = ScreenService.GetWorkingArea(this);
-        Left += _walkDirection * 2.15;
+        // 16ms × ~1.05px ≈ 原 33ms × 2.15 的水平速度，位移更细腻
+        Left += _walkDirection * 1.05;
         if (Left <= area.Left)
         {
             Left = area.Left;
