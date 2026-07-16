@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using System.Windows;
 using BunnyCompanion.Models;
 
@@ -349,47 +350,71 @@ public sealed class AiAgentService
                 if (parsed is null)
                     return null;
 
-                // 有 tool_calls：执行并回灌
+                // 有 tool_calls（官方 JSON 或正文里伪 XML）：执行并回灌，禁止把工具原文甩给用户
                 if (enableTools && parsed.ToolCalls is { Count: > 0 })
                 {
-                    // 把 assistant tool_calls 消息追加
-                    messages.Add(parsed.RawAssistantMessage);
+                    var fromPseudo = parsed.ToolCallsFromContent;
+                    if (fromPseudo)
+                    {
+                        // 伪 tool_call：不把乱码正文写进历史，改为标准 tool_calls 结构
+                        messages.Add(BuildSyntheticToolCallMessage(parsed.ToolCalls));
+                    }
+                    else
+                    {
+                        messages.Add(parsed.RawAssistantMessage);
+                    }
 
+                    var toolResults = new List<string>();
                     foreach (var call in parsed.ToolCalls)
                     {
                         progress?.Report($"执行工具：{call.Name}…");
                         toolTrace.Add(call.Name);
-                        JsonObject? argsObj = null;
-                        try
-                        {
-                            argsObj = string.IsNullOrWhiteSpace(call.ArgumentsJson)
-                                ? new JsonObject()
-                                : JsonNode.Parse(call.ArgumentsJson) as JsonObject ?? new JsonObject();
-                        }
-                        catch
-                        {
-                            argsObj = new JsonObject();
-                        }
+                        var argsObj = ParseToolArgs(call.ArgumentsJson);
+                        NormalizeZodiacArgs(argsObj);
 
                         var result = await WindowsAgentToolkit.ExecuteAsync(call.Name, argsObj, cancellationToken)
                             .ConfigureAwait(false);
                         if (result.Length > AiConfig.MaxToolResultChars)
                             result = result[..AiConfig.MaxToolResultChars] + "\n…(工具输出截断)";
+                        toolResults.Add(result);
 
                         messages.Add(new JsonObject
                         {
                             ["role"] = "tool",
                             ["tool_call_id"] = call.Id,
+                            ["name"] = call.Name,
                             ["content"] = result,
+                        });
+                    }
+
+                    // 若正文几乎全是 tool_call 乱码，且只有本地确定性工具（星座等），直接返回工具结果，避免再一轮模型又胡写
+                    if (fromPseudo && toolResults.Count > 0 && LooksLikeOnlyToolMarkup(parsed.Content)
+                        && parsed.ToolCalls.All(c => IsDeterministicLocalTool(c.Name)))
+                    {
+                        return new LoopHit(string.Join("\n\n", toolResults), providerLabel);
+                    }
+
+                    // 伪调用时追加一句约束，强制下一轮用中文总结、禁止再输出 tool 标签
+                    if (fromPseudo)
+                    {
+                        messages.Add(new JsonObject
+                        {
+                            ["role"] = "user",
+                            ["content"] = "上面工具结果已经给你了。请用温柔中文直接回答用户，禁止再输出 <tool_call>、<function> 等任何标签或 XML。",
                         });
                     }
 
                     continue; // 下一轮让模型总结
                 }
 
-                // 最终文本
+                // 最终文本：清洗可能残留的 tool 标签
                 if (!string.IsNullOrWhiteSpace(parsed.Content))
-                    return new LoopHit(parsed.Content, providerLabel);
+                {
+                    var cleaned = StripToolMarkup(parsed.Content);
+                    if (string.IsNullOrWhiteSpace(cleaned))
+                        return null;
+                    return new LoopHit(cleaned, providerLabel);
+                }
 
                 // 有些模型 content 空但有 reasoning —— 视为失败
                 return null;
@@ -416,7 +441,8 @@ public sealed class AiAgentService
     private sealed record ParsedAssistant(
         string? Content,
         IReadOnlyList<ToolCall>? ToolCalls,
-        JsonObject RawAssistantMessage);
+        JsonObject RawAssistantMessage,
+        bool ToolCallsFromContent = false);
 
     private static ParsedAssistant? ParseAssistantMessage(string json)
     {
@@ -452,6 +478,7 @@ public sealed class AiAgentService
             }
 
             List<ToolCall>? calls = null;
+            var fromContent = false;
             if (message.TryGetProperty("tool_calls", out var toolCalls) && toolCalls.ValueKind == JsonValueKind.Array)
             {
                 calls = [];
@@ -473,15 +500,159 @@ public sealed class AiAgentService
                 }
             }
 
+            // 模型把工具调用写进正文（<tool_call>…）时也要执行，否则用户会看到「乱码」
+            if ((calls is null || calls.Count == 0) && !string.IsNullOrWhiteSpace(content))
+            {
+                var embedded = ParseEmbeddedToolCalls(content);
+                if (embedded.Count > 0)
+                {
+                    calls = embedded;
+                    fromContent = true;
+                }
+            }
+
             if (calls is { Count: 0 })
                 calls = null;
 
-            return new ParsedAssistant(content?.Trim(), calls, raw);
+            return new ParsedAssistant(content?.Trim(), calls, raw, fromContent);
         }
         catch
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// 解析模型误输出的伪工具调用，例如：
+    /// &lt;tool_call&gt;&lt;function=zodiac_analyze&gt;&lt;parameter=sign&gt;双鱼座&lt;/parameter&gt;...
+    /// </summary>
+    private static List<ToolCall> ParseEmbeddedToolCalls(string content)
+    {
+        var list = new List<ToolCall>();
+        if (string.IsNullOrWhiteSpace(content))
+            return list;
+
+        // 形式 A：<tool_call> <function=name> <parameter=k>v</parameter> </function> </tool_call>
+        var blockRx = new Regex(
+            @"<tool_call>\s*<function\s*=\s*([a-zA-Z0-9_]+)>(.*?)</function>\s*</tool_call>",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        foreach (Match m in blockRx.Matches(content))
+        {
+            var name = m.Groups[1].Value.Trim();
+            var body = m.Groups[2].Value;
+            var args = new JsonObject();
+            foreach (Match pm in Regex.Matches(body,
+                         @"<parameter\s*=\s*([a-zA-Z0-9_]+)>\s*(.*?)\s*</parameter>",
+                         RegexOptions.IgnoreCase | RegexOptions.Singleline))
+            {
+                args[pm.Groups[1].Value.Trim()] = pm.Groups[2].Value.Trim();
+            }
+
+            list.Add(new ToolCall("pseudo_" + Guid.NewGuid().ToString("N")[..12], name, args.ToJsonString()));
+        }
+
+        if (list.Count > 0)
+            return list;
+
+        // 形式 B：invoke tool xxx 或 function call zodiac_analyze(...)
+        var invokeRx = new Regex(
+            @"(?:invoke\s+tool|function\s*call|call\s+tool)\s+([a-zA-Z0-9_]+)\s*[\({]([^)}\n]*)[\)}]",
+            RegexOptions.IgnoreCase);
+        foreach (Match m in invokeRx.Matches(content))
+        {
+            var name = m.Groups[1].Value.Trim();
+            var rawArgs = m.Groups[2].Value.Trim();
+            var args = new JsonObject { ["query"] = rawArgs };
+            list.Add(new ToolCall("pseudo_" + Guid.NewGuid().ToString("N")[..12], name, args.ToJsonString()));
+        }
+
+        return list;
+    }
+
+    private static JsonObject BuildSyntheticToolCallMessage(IReadOnlyList<ToolCall> calls)
+    {
+        var arr = new JsonArray();
+        foreach (var c in calls)
+        {
+            arr.Add(new JsonObject
+            {
+                ["id"] = c.Id,
+                ["type"] = "function",
+                ["function"] = new JsonObject
+                {
+                    ["name"] = c.Name,
+                    ["arguments"] = c.ArgumentsJson,
+                },
+            });
+        }
+
+        return new JsonObject
+        {
+            ["role"] = "assistant",
+            ["content"] = null,
+            ["tool_calls"] = arr,
+        };
+    }
+
+    private static JsonObject ParseToolArgs(string? argumentsJson)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(argumentsJson))
+                return new JsonObject();
+            return JsonNode.Parse(argumentsJson) as JsonObject ?? new JsonObject();
+        }
+        catch
+        {
+            return new JsonObject { ["query"] = argumentsJson };
+        }
+    }
+
+    /// <summary>把 sign/date 等别名参数归一到 zodiac_analyze 的 query。</summary>
+    private static void NormalizeZodiacArgs(JsonObject args)
+    {
+        if (args.ContainsKey("query") && !string.IsNullOrWhiteSpace(args["query"]?.ToString()))
+            return;
+        var sign = args["sign"]?.ToString()?.Trim().Trim('"');
+        var date = args["date"]?.ToString()?.Trim().Trim('"');
+        if (!string.IsNullOrWhiteSpace(date))
+            args["query"] = date;
+        else if (!string.IsNullOrWhiteSpace(sign))
+            args["query"] = sign;
+    }
+
+    private static bool IsDeterministicLocalTool(string name) =>
+        name is "zodiac_analyze" or "daily_card" or "get_system_info" or "get_system_monitor"
+            or "memory_list" or "memo_list" or "agent_md_path" or "get_special_folder";
+
+    private static bool LooksLikeOnlyToolMarkup(string? content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+            return true;
+        var stripped = StripToolMarkup(content);
+        return string.IsNullOrWhiteSpace(stripped) || stripped.Length < 8;
+    }
+
+    private static string StripToolMarkup(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return text;
+        var cleaned = text;
+        cleaned = Regex.Replace(cleaned,
+            @"<tool_call>[\s\S]*?</tool_call>",
+            "",
+            RegexOptions.IgnoreCase);
+        cleaned = Regex.Replace(cleaned,
+            @"</?tool_call>|</?function[^>]*>|</?parameter[^>]*>",
+            "",
+            RegexOptions.IgnoreCase);
+        cleaned = Regex.Replace(cleaned,
+            @"<function\s*=\s*[^>]+>[\s\S]*?</function>",
+            "",
+            RegexOptions.IgnoreCase);
+        // 残留半截标签
+        cleaned = Regex.Replace(cleaned, @"</?(?:tool_call|function|parameter)[^>]*>?", "", RegexOptions.IgnoreCase);
+        return cleaned.Trim();
     }
 
     private static JsonArray BuildInitialMessages(
@@ -737,7 +908,7 @@ public sealed class AiAgentService
 
     private static string CleanReply(string text)
     {
-        var cleaned = (text ?? string.Empty).Replace("\r\n", "\n", StringComparison.Ordinal).Trim();
+        var cleaned = StripToolMarkup((text ?? string.Empty).Replace("\r\n", "\n", StringComparison.Ordinal).Trim());
         if (cleaned.Length > AiConfig.MaxReplyChars)
             cleaned = cleaned[..AiConfig.MaxReplyChars] + "\n…（后面还有，再说一声我继续发）";
         return cleaned;

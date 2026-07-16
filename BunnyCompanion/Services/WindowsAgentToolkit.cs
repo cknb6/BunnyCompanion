@@ -73,9 +73,11 @@ public static class WindowsAgentToolkit
             "返回本机 agent.md 的完整路径，便于用户打开编辑手写备注区。",
             new JsonObject()),
         Tool("zodiac_analyze",
-            "星座趣味分析。传入生日（1999-8-15）或星座名（处女座）。",
-            Props(("query", "string", "生日或星座名")),
-            required: ["query"]),
+            "星座趣味分析。传入生日（公历1999-8-15 / 农历2002正月20）或星座名（处女座）。也可用 sign/date 参数。",
+            Props(
+                ("query", "string", "生日或星座名，优先"),
+                ("sign", "string", "可选星座名"),
+                ("date", "string", "可选生日"))),
         Tool("daily_card",
             "生成今日陪伴卡：能量/穿搭/习惯/一句话（趣味）。",
             Props(("name", "string", "可选称呼"))),
@@ -215,7 +217,7 @@ public static class WindowsAgentToolkit
                 "memory_list" => MemoryListText(),
                 "agent_md_read" => AgentMdRead(Int(args, "max_chars", 8000)),
                 "agent_md_path" => CompanionRuntime.AgentMd.FilePath,
-                "zodiac_analyze" => ZodiacService.Analyze(Str(args, "query"), "宝宝"),
+                "zodiac_analyze" => ZodiacAnalyze(args),
                 "daily_card" => DailyCompanion.BuildDailyCard(
                     string.IsNullOrWhiteSpace(Str(args, "name")) ? "宝宝" : Str(args, "name")),
                 "list_dir" => ListDir(Str(args, "path"), Int(args, "max_entries", 80)),
@@ -258,6 +260,21 @@ public static class WindowsAgentToolkit
         {
             return $"错误：{ex.GetType().Name}: {ex.Message}";
         }
+    }
+
+    private static string ZodiacAnalyze(JsonObject args)
+    {
+        var query = Str(args, "query");
+        if (string.IsNullOrWhiteSpace(query))
+            query = Str(args, "date");
+        if (string.IsNullOrWhiteSpace(query))
+            query = Str(args, "sign");
+        // 两者都有时拼在一起让解析器优先吃日期
+        var sign = Str(args, "sign");
+        var date = Str(args, "date");
+        if (!string.IsNullOrWhiteSpace(date) && !string.IsNullOrWhiteSpace(sign))
+            query = date + " " + sign;
+        return ZodiacService.Analyze(query, "宝宝");
     }
 
     private static string MemoryListText()

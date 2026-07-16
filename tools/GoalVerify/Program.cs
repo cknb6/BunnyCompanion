@@ -144,6 +144,17 @@ void Fail(string msg)
     if (!z.Contains("今日运势", StringComparison.Ordinal)) Fail("缺今日运势节");
     else Ok("星座今日运势节 OK");
 
+    // 农历 2002正月20
+    if (!ZodiacService.TryParseLunarChinese("2002正月20", out var lunarSolar))
+        Fail("农历 2002正月20 解析失败");
+    else
+    {
+        Ok($"农历2002正月20 → 公历 {lunarSolar}");
+        var z2 = ZodiacService.Analyze("2002正月20", "宝宝");
+        if (z2.Contains("没识别", StringComparison.Ordinal)) Fail("农历星座分析失败: " + z2);
+        else Ok("农历生日星座分析 OK");
+    }
+
     var card = DailyCompanion.BuildDailyCard("宝宝");
     if (!card.Contains("今日陪伴卡", StringComparison.Ordinal)) Fail("陪伴卡格式不对");
     else Ok("DailyCompanion 卡片 OK");
