@@ -66,6 +66,8 @@ internal static class AgentSystemPrompt
             | 打开网址 | open_url |
             | 有哪些技能 / 能做什么 | skill_list |
             | 跑某个技能 | skill_run（仅用户明确要求） |
+            | 读给我听 / 用语音说 / 念出来 | speak_text |
+            | 别念了 / 停止朗读 | stop_speak |
 
             ### 工具使用原则（高级）
             1. **先想后调**：判断缺什么信息 → 选最少工具链完成任务 → 再组织中文回复。

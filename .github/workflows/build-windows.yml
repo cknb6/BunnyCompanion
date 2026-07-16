@@ -58,7 +58,11 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           Remove-Item "可直接发送" -Recurse -Force -ErrorAction SilentlyContinue
-          & .\Build-Windows.ps1 -Runtime ${{ matrix.rid }} -Configuration Release
+          # 版本 = csproj 主版本 + Actions run_number，写入 EXE FileVersion 供客户端比较更新
+          $appVersion = (Select-String -Path "BunnyCompanion/BunnyCompanion.csproj" -Pattern '<Version>([^<]+)</Version>').Matches.Groups[1].Value
+          if ($appVersion -notmatch '^\d+\.\d+\.\d+') { throw "bad Version in csproj: $appVersion" }
+          $full = "$appVersion.$env:GITHUB_RUN_NUMBER"
+          & .\Build-Windows.ps1 -Runtime ${{ matrix.rid }} -Configuration Release -VersionOverride $full
           Get-ChildItem "可直接发送" | Format-Table Name, Length
 
       - name: Upload per-arch artifact
@@ -152,10 +156,11 @@ jobs:
           | **BunnyCompanion-win-x64.exe** | 绝大多数 Intel / AMD Windows（含多数 Windows on ARM 的 x64 兼容） |
           | **BunnyCompanion-win-arm64.exe** | 原生 ARM64 Windows（如部分 Surface / Snapdragon 本） |
           | README-zh.txt | 中文使用说明 |
-          | checksums.txt | 校验信息（若有） |
+          | checksums.txt | **SHA256 校验（自动更新强制校验，勿手改）** |
 
           - **自包含**，约 70～100MB，**无需安装 .NET**
           - 每个架构只需下载 **一个** EXE
+          - 程序内「检查更新」只认本仓库 Release + checksums.txt 哈希
           - SmartScreen 若拦截：更多信息 → 仍要运行
 
           ### 为何不能只有一个「通用 EXE」？

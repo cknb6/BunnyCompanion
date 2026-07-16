@@ -197,6 +197,13 @@ public static class WindowsAgentToolkit
             "向对话返回一条给用户看的中间状态说明（不会弹系统通知）。用于说明正在执行的步骤。",
             Props(("message", "string", "说明文字")),
             required: ["message"]),
+        Tool("speak_text",
+            "用语音朗读一段文字给用户听（在线 TTS 优先，失败回退系统语音）。用户说「读给我听」「念出来」「用语音说」时调用。",
+            Props(("text", "string", "要朗读的中文内容，建议不超过 300 字")),
+            required: ["text"]),
+        Tool("stop_speak",
+            "停止当前语音朗读。",
+            new JsonObject()),
     ];
 
     public static async Task<string> ExecuteAsync(string name, JsonObject? args, CancellationToken ct)
@@ -249,6 +256,8 @@ public static class WindowsAgentToolkit
                         Str(args, "name"), Str(args, "arguments"), Int(args, "timeout_seconds", 30), ct)
                     .ConfigureAwait(false),
                 "notify_user" => "OK: " + Str(args, "message"),
+                "speak_text" => SpeakTextTool(Str(args, "text")),
+                "stop_speak" => StopSpeakTool(),
                 _ => $"错误：未知工具 {name}",
             };
         }
@@ -275,6 +284,39 @@ public static class WindowsAgentToolkit
         if (!string.IsNullOrWhiteSpace(date) && !string.IsNullOrWhiteSpace(sign))
             query = date + " " + sign;
         return ZodiacService.Analyze(query, "宝宝");
+    }
+
+    private static string SpeakTextTool(string text)
+    {
+        text = (text ?? "").Trim();
+        if (string.IsNullOrEmpty(text))
+            return "错误：没有可朗读的文字。";
+        if (text.Length > 500)
+            text = text[..500];
+
+        try
+        {
+            // 用户通过对话明确要求朗读时总是执行（与「自动朗读回复」开关无关）
+            VoiceService.Speak(text);
+            return "已开始朗读。";
+        }
+        catch (Exception ex)
+        {
+            return "朗读失败：" + ex.Message;
+        }
+    }
+
+    private static string StopSpeakTool()
+    {
+        try
+        {
+            VoiceService.Stop();
+            return "已停止朗读。";
+        }
+        catch (Exception ex)
+        {
+            return "停止朗读失败：" + ex.Message;
+        }
     }
 
     private static string MemoryListText()

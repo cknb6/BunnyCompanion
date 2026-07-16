@@ -183,8 +183,103 @@ public partial class MainWindow : Window
                     PlayAction("wave", exclusiveSeconds: 1.8);
                 }
                 CheckSpecialDate(force: true);
+                // 启动后延迟检查更新，不挡 intro
+                ScheduleAutoUpdateCheck();
             });
         }));
+    }
+
+    /// <summary>启动约 12 秒后静默检查 GitHub 更新（需开启 AutoCheckUpdate）。</summary>
+    private void ScheduleAutoUpdateCheck()
+    {
+        if (!_settings.AutoCheckUpdate)
+            return;
+        var t = new DispatcherTimer { Interval = TimeSpan.FromSeconds(12) };
+        t.Tick += async (_, _) =>
+        {
+            t.Stop();
+            if (_isExiting)
+                return;
+            try
+            {
+                await CheckForUpdatesAsync(interactive: false).ConfigureAwait(true);
+            }
+            catch
+            {
+                // 静默失败
+            }
+        };
+        t.Start();
+    }
+
+    private async Task CheckForUpdatesAsync(bool interactive)
+    {
+        if (_isExiting)
+            return;
+
+        if (interactive)
+            ShowMessage("正在检查更新…", 2.5);
+
+        var check = await AppUpdateService.CheckAsync(
+            minInterval: interactive ? TimeSpan.Zero : TimeSpan.FromHours(6),
+            force: interactive).ConfigureAwait(true);
+
+        if (_isExiting || !IsLoaded)
+            return;
+
+        if (!check.Success)
+        {
+            if (interactive)
+                ShowMessage(check.Message, 5);
+            return;
+        }
+
+        if (!check.UpdateAvailable)
+        {
+            if (interactive)
+                ShowMessage(check.Message, 3.5);
+            return;
+        }
+
+        var remote = check.RemoteVersion is null
+            ? check.TagName ?? "?"
+            : AppUpdateService.FormatVersion(check.RemoteVersion);
+        var ask = MessageBox.Show(
+            this,
+            $"{check.Message}\n\n" +
+            $"来源：GitHub {AppUpdateService.Owner}/{AppUpdateService.Repo}\n" +
+            $"文件：{check.TargetFileName}\n" +
+            $"SHA256：{check.ExpectedSha256}\n\n" +
+            "将后台下载并用官方 checksums.txt 校验哈希；\n" +
+            "不一致则拒绝安装。通过后会重启完成替换。\n\n" +
+            "现在更新吗？",
+            $"发现新版本 {remote}",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question);
+
+        if (ask != MessageBoxResult.Yes)
+            return;
+
+        ShowMessage("正在下载并校验更新…", 4);
+        var progress = new Progress<string>(msg =>
+        {
+            if (!_isExiting && IsLoaded)
+                ShowMessage(msg, 3);
+        });
+
+        var apply = await AppUpdateService.DownloadVerifyAndScheduleReplaceAsync(check, progress)
+            .ConfigureAwait(true);
+
+        if (!apply.Success)
+        {
+            MessageBox.Show(this, apply.Message, "更新失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        ShowMessage("校验通过，即将重启…", 2);
+        await Task.Delay(600).ConfigureAwait(true);
+        // 正常退出，让脚本替换 EXE 并拉起新版本
+        ExitApplication();
     }
 
     /// <summary>
@@ -657,8 +752,9 @@ public partial class MainWindow : Window
         var area = ScreenService.GetWorkingArea(this);
         var roomLeft = Left - area.Left;
         var roomRight = area.Right - (Left + Width);
+        // 优先走向空间更大的一侧；素材默认朝左，见 PetFacing
         _walkDirection = roomRight < Width / 2 ? -1 : roomLeft < Width / 2 ? 1 : Random.Shared.Next(2) == 0 ? -1 : 1;
-        FacingTransform.ScaleX = _walkDirection;
+        FacingTransform.ScaleX = PetFacing.ScaleXForMove(_walkDirection);
         _walkUntil = DateTime.Now.AddSeconds(Random.Shared.Next(4, 9));
         _isWalking = true;
         // 清除短互斥，避免 walk 被后续 ambient 立刻顶掉观感
@@ -701,14 +797,14 @@ public partial class MainWindow : Window
         if (Left <= area.Left)
         {
             Left = area.Left;
-            _walkDirection = 1;
-            FacingTransform.ScaleX = 1;
+            _walkDirection = 1; // 撞左墙 → 往右走
+            FacingTransform.ScaleX = PetFacing.ScaleXForMove(_walkDirection);
         }
         else if (Left + Width >= area.Right)
         {
             Left = area.Right - Width;
-            _walkDirection = -1;
-            FacingTransform.ScaleX = -1;
+            _walkDirection = -1; // 撞右墙 → 往左走
+            FacingTransform.ScaleX = PetFacing.ScaleXForMove(_walkDirection);
         }
 
         if (DateTime.Now >= _walkUntil)
@@ -902,9 +998,9 @@ public partial class MainWindow : Window
         if (!_dragMoved && Math.Abs(deltaX) + Math.Abs(deltaY) > 5)
         {
             _dragMoved = true;
-            // 拖起瞬间：多样化开场动作 + 面向拖拽方向
+            // 拖起瞬间：多样化开场动作 + 面向拖拽方向（素材默认朝左）
             if (Math.Abs(deltaX) > 2)
-                FacingTransform.ScaleX = deltaX >= 0 ? 1 : -1;
+                FacingTransform.ScaleX = PetFacing.ScaleXForDragDelta(deltaX);
             var startRx = MouseReactionCatalog.PickDragStart(_settings.PartnerName);
             ApplyMouseReaction(startRx, exclusiveSeconds: 0);
         }
@@ -912,7 +1008,7 @@ public partial class MainWindow : Window
             return;
 
         if (Math.Abs(deltaX) > 8)
-            FacingTransform.ScaleX = deltaX >= 0 ? 1 : -1;
+            FacingTransform.ScaleX = PetFacing.ScaleXForDragDelta(deltaX);
         Left = _dragStartLeft + deltaX;
         Top = _dragStartTop + deltaY;
     }
@@ -1696,6 +1792,18 @@ public partial class MainWindow : Window
         AddMenuItem(_trayMenu.Items, "回到屏幕右下角", (_, _) => ResetPosition());
         AddMenuItem(_trayMenu.Items, "打开本地配置目录", (_, _) => OpenConfigDirectory());
         AddMenuItem(_trayMenu.Items, "打开长期记忆 agent.md", (_, _) => OpenAgentMd());
+        AddMenuItem(_trayMenu.Items, "检查更新…", (_, _) =>
+        {
+            _ = Dispatcher.InvokeAsync(async () =>
+            {
+                try { await CheckForUpdatesAsync(interactive: true).ConfigureAwait(true); }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, "检查更新失败：" + ex.Message, "更新",
+                        MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+            });
+        });
         AddMenuItem(_trayMenu.Items, "关于", (_, _) => ShowAbout());
         _trayMenu.Items.Add(new Forms.ToolStripSeparator());
         AddMenuItem(_trayMenu.Items, "完全退出", (_, _) => ExitApplication());

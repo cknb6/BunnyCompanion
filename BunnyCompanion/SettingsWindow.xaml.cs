@@ -52,6 +52,7 @@ public partial class SettingsWindow : Window
         ClickThroughCheck.IsChecked = settings.ClickThrough;
         TtsCheck.IsChecked = settings.TtsEnabled;
         VoiceInputCheck.IsChecked = settings.VoiceInputEnabled;
+        AutoUpdateCheck.IsChecked = settings.AutoCheckUpdate;
         var triggers = settings.SystemTriggers ?? new SystemTriggerConfig();
         SystemTriggerCheck.IsChecked = triggers.Enabled;
         CpuThresholdBox.Text = Math.Round(triggers.HighCpuThreshold).ToString();
@@ -110,6 +111,7 @@ public partial class SettingsWindow : Window
         _settings.ClickThrough = ClickThroughCheck.IsChecked == true;
         _settings.TtsEnabled = TtsCheck.IsChecked == true;
         _settings.VoiceInputEnabled = VoiceInputCheck.IsChecked == true;
+        _settings.AutoCheckUpdate = AutoUpdateCheck.IsChecked == true;
         _settings.SystemTriggers ??= new SystemTriggerConfig();
         _settings.SystemTriggers.Enabled = SystemTriggerCheck.IsChecked == true;
         _settings.SystemTriggers.HighCpuThreshold = cpuThreshold;

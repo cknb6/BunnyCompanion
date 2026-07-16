@@ -11,10 +11,12 @@ public sealed class PetSettings
     public bool AutoWalk { get; set; } = true;
     public bool StartWithWindows { get; set; } = true;
     public bool SoundEnabled { get; set; } = true;
-    /// <summary>是否用语音朗读 Agent 回复（TTS，需 Windows SAPI）。</summary>
-    public bool TtsEnabled { get; set; }
-    /// <summary>是否启用语音输入按钮（语音识别，需 Windows SAPI）。</summary>
+    /// <summary>是否用语音朗读 Agent 回复（默认开：在线 TTS 失败会回退系统语音）。</summary>
+    public bool TtsEnabled { get; set; } = true;
+    /// <summary>是否启用语音输入按钮（语音识别，需 Windows 麦克风与语音组件）。</summary>
     public bool VoiceInputEnabled { get; set; } = true;
+    /// <summary>启动后自动检查 GitHub 更新（SHA256 校验通过才提示安装）。</summary>
+    public bool AutoCheckUpdate { get; set; } = true;
     public bool ShowSpeechBubbles { get; set; } = true;
     public bool QuietMode { get; set; }
     public bool HideForFullscreen { get; set; } = true;

@@ -1125,12 +1125,12 @@ public partial class ChatWindow : Window
             return;
         if (!_settings.VoiceInputEnabled)
         {
-            AppendSystemTip("语音输入未开启，可在设置中打开。");
+            AppendSystemTip("语音输入未开启：设置 → 勾选「语音输入」。");
             return;
         }
         if (!VoiceService.IsRecognitionAvailable)
         {
-            AppendSystemTip("未检测到 Windows 语音识别，请确认系统已启用语音功能。");
+            AppendSystemTip("未检测到 Windows 语音组件。请确认：麦克风可用、系统已安装中文语音识别，然后再试。");
             return;
         }
 
@@ -1138,10 +1138,11 @@ public partial class ChatWindow : Window
         var oldContent = VoiceButton.Content;
         VoiceButton.Content = "…";
         VoiceButton.IsEnabled = false;
-        StatusText.Text = "正在听…说一句话吧";
+        StatusText.Text = "正在听…请对着麦克风说中文";
+        AppendSystemTip("🎤 正在听你说（约 8 秒）…说完稍等一下。");
         _ = Task.Run(() =>
         {
-            var text = VoiceService.RecognizeOnce(7000);
+            var text = VoiceService.RecognizeOnce(9000);
             Dispatcher.Invoke(() =>
             {
                 if (!IsLoaded)
@@ -1151,12 +1152,15 @@ public partial class ChatWindow : Window
                 if (string.IsNullOrWhiteSpace(text))
                 {
                     StatusText.Text = "没听清，再说一次或直接打字～";
+                    AppendSystemTip("没听清～请靠近麦克风、说清楚一点，或改用打字。也可在 Windows 设置里安装「中文语音识别」。");
                     return;
                 }
                 InputBox.Text = text;
                 InputBox.Focus();
                 InputBox.CaretIndex = text.Length;
-                StatusText.Text = "已识别，可发送";
+                StatusText.Text = "已识别，正在发送…";
+                // 识别成功后自动发送，减少一步点击
+                _ = SendAsync(includeDesktop: DesktopCheck.IsChecked == true);
             });
         });
     }
@@ -1171,10 +1175,15 @@ public partial class ChatWindow : Window
             // 安静时段不朗读
             if (IsQuietNow())
                 return;
-            // 长文截断：最多念前 300 字，避免念太久
-            var spoken = text.Length > 300 ? text[..300] : text;
-            // 去掉 markdown 符号，让朗读更自然
-            spoken = System.Text.RegularExpressions.Regex.Replace(spoken, @"[#*`>\-]", " ");
+            // 长文截断：最多念前 280 字，避免念太久
+            var spoken = text.Replace("\r\n", "\n", StringComparison.Ordinal).Trim();
+            // 去掉 markdown / 多余空白
+            spoken = System.Text.RegularExpressions.Regex.Replace(spoken, @"[#*`>\|\[\]\(\)]", " ");
+            spoken = System.Text.RegularExpressions.Regex.Replace(spoken, @"\s+", " ");
+            if (spoken.Length > 280)
+                spoken = spoken[..280] + "……";
+            if (string.IsNullOrWhiteSpace(spoken))
+                return;
             VoiceService.Speak(spoken);
         }
         catch

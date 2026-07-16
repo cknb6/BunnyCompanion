@@ -104,8 +104,11 @@
             <WrapPanel Margin="0,9,0,0">
               <CheckBox x:Name="TtsCheck" Content="朗读回复" />
               <CheckBox x:Name="VoiceInputCheck" Content="语音输入" />
+              <CheckBox x:Name="AutoUpdateCheck" Content="自动检查更新" />
               <CheckBox x:Name="SystemTriggerCheck" Content="启用系统状态提醒" />
             </WrapPanel>
+            <TextBlock Text="更新只从 GitHub 官方 Release 下载，并用 checksums.txt 的 SHA256 校验，不一致则拒绝安装。"
+                       FontSize="11.5" Foreground="#917B85" TextWrapping="Wrap" Margin="0,4,0,0" />
             <TextBlock Text="阈值填写 0 可关闭对应提醒；系统状态只在非安静时段提示。"
                        FontSize="11.5" Foreground="#917B85" TextWrapping="Wrap" />
             <Grid Margin="0,13,0,0">

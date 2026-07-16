@@ -17,6 +17,8 @@
     <Compile Include="..\..\BunnyCompanion\Services\FolderPathResolver.cs" Link="FolderPathResolver.cs" />
     <Compile Include="..\..\BunnyCompanion\Services\DailyCompanion.cs" Link="DailyCompanion.cs" />
     <Compile Include="..\..\BunnyCompanion\Engine\MouseReactionCatalog.cs" Link="MouseReactionCatalog.cs" />
+    <Compile Include="..\..\BunnyCompanion\Engine\PetFacing.cs" Link="PetFacing.cs" />
+    <Compile Include="..\..\BunnyCompanion\Services\AppUpdateService.cs" Link="AppUpdateService.cs" />
     <Compile Include="..\..\BunnyCompanion\Models\PetSettings.cs" Link="PetSettings.cs" />
     <Compile Include="..\..\BunnyCompanion\Services\SystemTriggerConfig.cs" Link="SystemTriggerConfig.cs" />
   </ItemGroup>

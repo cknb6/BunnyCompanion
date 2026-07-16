@@ -11,7 +11,7 @@
     <ApplicationIcon>Assets\BunnyCompanion.ico</ApplicationIcon>
     <AssemblyName>BunnyCompanion</AssemblyName>
     <RootNamespace>BunnyCompanion</RootNamespace>
-    <Version>1.3.0</Version>
+    <Version>1.4.0</Version>
     <Title>小申陪伴</Title>
     <Product>小申陪伴</Product>
     <Authors>传康KK</Authors>

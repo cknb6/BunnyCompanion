@@ -253,8 +253,78 @@ void Fail(string msg)
     if (intensity != DragIntensity.Fling) Fail($"强度应为 Fling 得 {intensity}");
     else Ok("ResolveDragIntensity Fling");
 
+    // walk 素材默认朝左：向右走 ScaleX=-1
+    if (Math.Abs(PetFacing.ScaleXForMove(1) - (-1.0)) > 0.001)
+        Fail("向右走 Facing 应为 -1，实际 " + PetFacing.ScaleXForMove(1));
+    else
+        Ok("PetFacing 向右 ScaleX=-1");
+    if (Math.Abs(PetFacing.ScaleXForMove(-1) - 1.0) > 0.001)
+        Fail("向左走 Facing 应为 +1");
+    else
+        Ok("PetFacing 向左 ScaleX=+1");
+
     File.WriteAllText(Path.Combine(scratch, "click-drag.txt"),
         $"zones={zones.Length}\nclick={click.ActionKey}/{click.Message}\nfling={fling.ActionKey}\nsoft={soft.ActionKey}\ndir={dir}\nintensity={intensity}\n");
+}
+
+// ---------- 3b) 自动更新：版本解析 + SHA256 解析 + URL 白名单 ----------
+{
+    if (!AppUpdateService.TryParseVersion("v1.4.0.27", out var remote)
+        || remote.Major != 1 || remote.Minor != 4 || remote.Build != 0 || remote.Revision != 27)
+        Fail("TryParseVersion v1.4.0.27 失败: " + remote);
+    else
+        Ok("TryParseVersion v1.4.0.27 OK");
+
+    if (!AppUpdateService.TryParseVersion("1.3.0", out var baseV) || baseV.Revision != 0)
+        Fail("TryParseVersion 1.3.0 失败");
+    else
+        Ok("TryParseVersion 1.3.0 OK");
+
+    if (!(remote > baseV))
+        Fail("版本比较 1.4.0.27 应大于 1.3.0");
+    else
+        Ok("版本比较 OK");
+
+    var sample = """
+        小申陪伴 1.4.0.27
+
+        [win-x64]
+        文件（英文名）：BunnyCompanion-win-x64.exe
+        SHA256：AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+        [win-arm64]
+        文件（英文名）：BunnyCompanion-win-arm64.exe
+        SHA256：BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+        """;
+    // 上面是 64 个 A/B；重新生成合法 64 hex
+    var ha = new string('a', 64);
+    var hb = new string('b', 64);
+    sample = $"""
+        [win-x64]
+        文件（英文名）：BunnyCompanion-win-x64.exe
+        SHA256：{ha}
+        [win-arm64]
+        BunnyCompanion-win-arm64.exe  SHA256={hb}
+        """;
+    var px = AppUpdateService.ParseSha256FromChecksums(sample, "BunnyCompanion-win-x64.exe");
+    var pa = AppUpdateService.ParseSha256FromChecksums(sample, "BunnyCompanion-win-arm64.exe");
+    if (px != ha) Fail("解析 x64 哈希失败: " + px);
+    else Ok("ParseSha256 x64 OK");
+    if (pa != hb) Fail("解析 arm64 哈希失败: " + pa);
+    else Ok("ParseSha256 arm64 OK");
+
+    if (!AppUpdateService.IsAllowedDownloadUrl(
+            "https://github.com/cknb6/BunnyCompanion/releases/download/v1.4.0.1/BunnyCompanion-win-x64.exe"))
+        Fail("官方下载 URL 应放行");
+    else
+        Ok("URL 白名单官方 OK");
+    if (AppUpdateService.IsAllowedDownloadUrl("http://evil.example/a.exe"))
+        Fail("http 非 HTTPS 不应放行");
+    else
+        Ok("URL 拒绝 http OK");
+    if (AppUpdateService.IsAllowedDownloadUrl("https://evil.example/BunnyCompanion-win-x64.exe"))
+        Fail("非 GitHub 域名不应放行");
+    else
+        Ok("URL 拒绝第三方域名 OK");
 }
 
 // ---------- 4) 天气高温/降水 ----------

@@ -112,53 +112,70 @@ public static class VoiceService
         SpeakSapi(text);
     }
 
-    /// <summary>阶跃在线 TTS：POST /audio/speech 返回 wav，写临时文件用 SoundPlayer 同步播放。</summary>
+    /// <summary>阶跃在线 TTS：优先 /v1/audio/speech，再试 step_plan 路径；写临时 wav 播放。</summary>
     private static async Task<bool> TryStepTtsAsync(string text)
     {
-        try
+        var bases = new[]
         {
-            // StepBaseUrl 为 step_plan/v1，阶跃语音在该域下同样可用
-            var url = $"{AiConfig.StepBaseUrl.TrimEnd('/')}/audio/speech";
-            var payload = new JsonObject
-            {
-                ["model"] = AiConfig.StepTtsModel,
-                ["input"] = text,
-                ["voice"] = AiConfig.StepTtsVoice,
-                ["response_format"] = "wav",
-            };
+            AiConfig.StepAudioBaseUrl.TrimEnd('/'),
+            AiConfig.StepBaseUrl.TrimEnd('/'),
+        };
+        // 主音色失败时换一个官方音色再试
+        var voices = new[] { AiConfig.StepTtsVoice, "cixingnansheng", "zhengpaiqingshu" };
 
-            using var request = new HttpRequestMessage(HttpMethod.Post, url);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", AiConfig.StepApiKey);
-            request.Content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
-
-            using var resp = await Http.SendAsync(request).ConfigureAwait(false);
-            if (!resp.IsSuccessStatusCode)
-                return false;
-            var bytes = await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
-            if (bytes.Length < 100)
-                return false;
-
-            // 写临时 wav 并同步播放（在后台线程，不影响 UI）
-            var tmp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"xiaoshen_tts_{Guid.NewGuid():N}.wav");
-            await System.IO.File.WriteAllBytesAsync(tmp, bytes).ConfigureAwait(false);
-            try
-            {
-                using var player = new System.Media.SoundPlayer(tmp);
-                player.PlaySync();
-            }
-            finally
-            {
-                try { System.IO.File.Delete(tmp); } catch { /* ignore */ }
-            }
-            return true;
-        }
-        catch
+        foreach (var baseUrl in bases)
         {
-            return false;
+            foreach (var voice in voices)
+            {
+                try
+                {
+                    var url = $"{baseUrl}/audio/speech";
+                    var payload = new JsonObject
+                    {
+                        ["model"] = AiConfig.StepTtsModel,
+                        ["input"] = text,
+                        ["voice"] = voice,
+                        ["response_format"] = "wav",
+                    };
+
+                    using var request = new HttpRequestMessage(HttpMethod.Post, url);
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", AiConfig.StepApiKey);
+                    request.Content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
+
+                    using var resp = await Http.SendAsync(request).ConfigureAwait(false);
+                    if (!resp.IsSuccessStatusCode)
+                        continue;
+                    var bytes = await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+                    if (bytes.Length < 100)
+                        continue;
+
+                    var tmp = Path.Combine(Path.GetTempPath(), $"xiaoshen_tts_{Guid.NewGuid():N}.wav");
+                    await File.WriteAllBytesAsync(tmp, bytes).ConfigureAwait(false);
+                    try
+                    {
+                        using var player = new System.Media.SoundPlayer(tmp);
+                        player.PlaySync();
+                    }
+                    finally
+                    {
+                        try { File.Delete(tmp); } catch { /* ignore */ }
+                    }
+
+                    return true;
+                }
+                catch
+                {
+                    // 试下一组 base/voice
+                }
+            }
         }
+
+        return false;
     }
 
-    /// <summary>SAPI 离线朗读（同步，应在后台线程调用）。</summary>
+    private const uint SpeakFlagsIsXml = 0x8; // SPF_IS_XML
+
+    /// <summary>SAPI 离线朗读（同步，应在后台线程调用）；优先中文语音。</summary>
     private static void SpeakSapi(string text)
     {
         lock (_gate)
@@ -166,7 +183,21 @@ public static class VoiceService
             EnsureVoice();
             if (_voice is null)
                 return;
-            try { _voice.Speak(text, SpeakFlagsAsync | SpeakFlagsPurgeBeforeSpeak, out _); }
+            try
+            {
+                // 用 SSML 指定中文，提升中文发音质量（系统无中文语音时仍会回退）
+                var escaped = System.Security.SecurityElement.Escape(text) ?? text;
+                var ssml =
+                    $"<?xml version=\"1.0\"?><speak version=\"1.0\" xml:lang=\"zh-CN\">{escaped}</speak>";
+                try
+                {
+                    _voice.Speak(ssml, SpeakFlagsAsync | SpeakFlagsPurgeBeforeSpeak | SpeakFlagsIsXml, out _);
+                }
+                catch
+                {
+                    _voice.Speak(text, SpeakFlagsAsync | SpeakFlagsPurgeBeforeSpeak, out _);
+                }
+            }
             catch { /* ignore */ }
         }
     }
@@ -189,25 +220,41 @@ public static class VoiceService
     /// 识别一次短句（阻塞，最多 timeoutMs 毫秒）。返回识别到的文本，失败返回空。
     /// 用 SAPI 共享识别器，简单可用；复杂场景建议后续接 Whisper/Vosk。
     /// </summary>
-    public static string RecognizeOnce(int timeoutMs = 6000)
+    public static string RecognizeOnce(int timeoutMs = 8000)
     {
         try
         {
-            // SAPI 识别器 COM 定义较繁琐，且共享识别器会抢系统语音焦点。
-            // 这里用 PowerShell 调 SAPI 做一次性识别，避免大段 COM 定义。
-            var script = """
+            // PowerShell 调 SAPI 一次性识别；优先 zh-CN，避免英文引擎听中文全空。
+            var listenMs = Math.Clamp(timeoutMs - 1500, 3000, 12000);
+            var script = $$"""
                 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+                $ErrorActionPreference = 'Stop'
                 Add-Type -AssemblyName System.Speech
-                $r = New-Object System.Speech.Recognition.SpeechRecognitionEngine
-                $r.SetInputToDefaultAudioInput()
-                $g = New-Object System.Speech.Recognition.DictationGrammar
-                $r.LoadGrammar($g)
-                $r.RecognizeAsyncStop()
-                $result = $r.Recognize([TimeSpan]::FromMilliseconds(5000))
-                if ($result) { $result.Text } else { '' }
-                $r.Dispose()
+                $culture = $null
+                try { $culture = [System.Globalization.CultureInfo]::GetCultureInfo('zh-CN') } catch { $culture = $null }
+                $r = $null
+                try {
+                  if ($culture -ne $null) {
+                    $r = New-Object System.Speech.Recognition.SpeechRecognitionEngine($culture)
+                  }
+                } catch { $r = $null }
+                if ($r -eq $null) {
+                  $r = New-Object System.Speech.Recognition.SpeechRecognitionEngine
+                }
+                try {
+                  $r.SetInputToDefaultAudioInput()
+                  $g = New-Object System.Speech.Recognition.DictationGrammar
+                  $r.LoadGrammar($g)
+                  $r.BabbleTimeout = [TimeSpan]::FromSeconds(2)
+                  $r.InitialSilenceTimeout = [TimeSpan]::FromSeconds(3)
+                  $r.EndSilenceTimeout = [TimeSpan]::FromSeconds(1.2)
+                  $result = $r.Recognize([TimeSpan]::FromMilliseconds({{listenMs}}))
+                  if ($result) { [Console]::Out.Write($result.Text) }
+                } finally {
+                  if ($r -ne $null) { $r.Dispose() }
+                }
                 """;
-            return RunPsCapture(script, timeoutMs).Trim();
+            return RunPsCapture(script, timeoutMs + 4000).Trim();
         }
         catch
         {

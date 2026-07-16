@@ -189,7 +189,7 @@ public sealed class AiAgentService
                 toolTrace.Add("prefetch");
             }
 
-            // 1) 阶跃 + tools
+            // 1) 阶跃 + tools（主路径，必须快成功；失败才短兜底）
             progress?.Report("在线思考中…");
             var step = await TryAgentLoopAsync(
                 providerLabel: "阶跃·3.7",
@@ -200,11 +200,12 @@ public sealed class AiAgentService
                 systemPrompt: systemPrompt,
                 history: historySnapshot,
                 images: images,
-                maxTokens: 2800,
+                maxTokens: AiConfig.StepDefaultMaxTokens,
                 enableTools: true,
                 progress: progress,
                 toolTrace: toolTrace,
                 extra: node => node["reasoning_effort"] = AiConfig.StepEffort,
+                requestTimeoutSeconds: AiConfig.StepRequestTimeoutSeconds,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             if (step is { } s)
             {
@@ -214,12 +215,38 @@ public sealed class AiAgentService
                     s.Provider, toolTrace, pendingUserTurn, userText: text);
             }
 
-            // 2) OpenRouter 免费 + tools（部分模型可能忽略 tools）
+            // 2) 阶跃纯文本再试一次（无 tools，往往更快出 content）
+            progress?.Report("阶跃换种方式再试…");
+            var stepPlain = await TryAgentLoopAsync(
+                providerLabel: "阶跃·3.7",
+                baseUrl: AiConfig.StepBaseUrl,
+                apiKey: AiConfig.StepApiKey,
+                model: AiConfig.StepModel,
+                openRouter: false,
+                systemPrompt: systemPrompt + "\n" + AgentSystemPrompt.BuildTextOnlyAddon(),
+                history: historySnapshot,
+                images: images.Count > 0 ? images : Array.Empty<ImageInput>(),
+                maxTokens: AiConfig.StepDefaultMaxTokens,
+                enableTools: false,
+                progress: progress,
+                toolTrace: toolTrace,
+                extra: node => node["reasoning_effort"] = AiConfig.StepEffort,
+                requestTimeoutSeconds: AiConfig.StepRequestTimeoutSeconds,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (stepPlain is { } sp)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return Finalize((sp.Text, InferAction(sp.Text)), settings,
+                    usedVisual: images.Count > 0, usedDesktop: desktopCaptured,
+                    sp.Provider, toolTrace, pendingUserTurn, userText: text);
+            }
+
+            // 3) OpenRouter 仅 1 个免费模型短超时（禁止再串行试一堆 120s）
             foreach (var model in images.Count > 0
                          ? AiConfig.OpenRouterFreeVisionModels
                          : AiConfig.OpenRouterFreeTextModels)
             {
-                progress?.Report("正在换条线路想想…");
+                progress?.Report("备用线路…");
                 var hit = await TryAgentLoopAsync(
                     providerLabel: $"OpenRouter·{ShortModel(model)}",
                     baseUrl: AiConfig.OpenRouterBaseUrl,
@@ -229,11 +256,12 @@ public sealed class AiAgentService
                     systemPrompt: systemPrompt,
                     history: historySnapshot,
                     images: images,
-                    maxTokens: 2200,
-                    enableTools: true,
+                    maxTokens: AiConfig.FallbackMaxTokens,
+                    enableTools: false, // 免费模型 tools 不稳，且会拖慢；预取数据已够
                     progress: progress,
                     toolTrace: toolTrace,
                     extra: null,
+                    requestTimeoutSeconds: AiConfig.FallbackRequestTimeoutSeconds,
                     cancellationToken: cancellationToken).ConfigureAwait(false);
                 if (hit is { } h)
                 {
@@ -242,30 +270,6 @@ public sealed class AiAgentService
                         usedVisual: images.Count > 0, usedDesktop: desktopCaptured,
                         h.Provider, toolTrace, pendingUserTurn, userText: text);
                 }
-            }
-
-            // 3) 纯文本再试阶跃（无 tools）
-            var stepPlain = await TryAgentLoopAsync(
-                providerLabel: "阶跃·3.7",
-                baseUrl: AiConfig.StepBaseUrl,
-                apiKey: AiConfig.StepApiKey,
-                model: AiConfig.StepModel,
-                openRouter: false,
-                systemPrompt: systemPrompt + "\n" + AgentSystemPrompt.BuildTextOnlyAddon(),
-                history: historySnapshot,
-                images: Array.Empty<ImageInput>(),
-                maxTokens: 2200,
-                enableTools: false,
-                progress: progress,
-                toolTrace: toolTrace,
-                extra: node => node["reasoning_effort"] = AiConfig.StepEffort,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-            if (stepPlain is { } sp)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                return Finalize((sp.Text, InferAction(sp.Text)), settings,
-                    usedVisual: false, usedDesktop: false,
-                    sp.Provider, toolTrace, pendingUserTurn, userText: text);
             }
 
             // 4) 本地关键词 + 预取数据拼装
@@ -314,13 +318,18 @@ public sealed class AiAgentService
         IProgress<string>? progress,
         List<string> toolTrace,
         Action<JsonObject>? extra,
+        int requestTimeoutSeconds,
         CancellationToken cancellationToken)
     {
         try
         {
-            // 可变消息列表（含 tool 回合）
+            // 阶跃：max_tokens 太小会被 reasoning 吃光，content 变空 → 误判失败 → 整条备用链拖死
+            if (!openRouter)
+                maxTokens = Math.Max(maxTokens, AiConfig.StepMinMaxTokens);
+
             var messages = BuildInitialMessages(systemPrompt, history, images);
             var tools = enableTools ? WindowsAgentToolkit.BuildToolDefinitions() : null;
+            var emptyContentRetries = 0;
 
             for (var round = 0; round < AiConfig.MaxToolRounds; round++)
             {
@@ -339,30 +348,38 @@ public sealed class AiAgentService
 
                 extra?.Invoke(payload);
 
-                var json = await PostChatAsync(
-                    $"{baseUrl.TrimEnd('/')}/chat/completions",
-                    apiKey,
-                    payload,
-                    cancellationToken,
-                    openRouter).ConfigureAwait(false);
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(requestTimeoutSeconds, 8, 90)));
+
+                string json;
+                try
+                {
+                    json = await PostChatAsync(
+                        $"{baseUrl.TrimEnd('/')}/chat/completions",
+                        apiKey,
+                        payload,
+                        timeoutCts.Token,
+                        openRouter).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // 单请求超时：快速失败，交给上层短兜底
+                    progress?.Report($"{providerLabel} 超时…");
+                    return null;
+                }
 
                 var parsed = ParseAssistantMessage(json);
                 if (parsed is null)
                     return null;
 
-                // 有 tool_calls（官方 JSON 或正文里伪 XML）：执行并回灌，禁止把工具原文甩给用户
+                // 有 tool_calls（官方 JSON 或正文里伪 XML）：执行并回灌
                 if (enableTools && parsed.ToolCalls is { Count: > 0 })
                 {
                     var fromPseudo = parsed.ToolCallsFromContent;
                     if (fromPseudo)
-                    {
-                        // 伪 tool_call：不把乱码正文写进历史，改为标准 tool_calls 结构
                         messages.Add(BuildSyntheticToolCallMessage(parsed.ToolCalls));
-                    }
                     else
-                    {
-                        messages.Add(parsed.RawAssistantMessage);
-                    }
+                        messages.Add(SanitizeAssistantMessageForHistory(parsed.RawAssistantMessage));
 
                     var toolResults = new List<string>();
                     foreach (var call in parsed.ToolCalls)
@@ -387,14 +404,12 @@ public sealed class AiAgentService
                         });
                     }
 
-                    // 若正文几乎全是 tool_call 乱码，且只有本地确定性工具（星座等），直接返回工具结果，避免再一轮模型又胡写
                     if (fromPseudo && toolResults.Count > 0 && LooksLikeOnlyToolMarkup(parsed.Content)
                         && parsed.ToolCalls.All(c => IsDeterministicLocalTool(c.Name)))
                     {
                         return new LoopHit(string.Join("\n\n", toolResults), providerLabel);
                     }
 
-                    // 伪调用时追加一句约束，强制下一轮用中文总结、禁止再输出 tool 标签
                     if (fromPseudo)
                     {
                         messages.Add(new JsonObject
@@ -404,10 +419,9 @@ public sealed class AiAgentService
                         });
                     }
 
-                    continue; // 下一轮让模型总结
+                    continue;
                 }
 
-                // 最终文本：清洗可能残留的 tool 标签
                 if (!string.IsNullOrWhiteSpace(parsed.Content))
                 {
                     var cleaned = StripToolMarkup(parsed.Content);
@@ -416,7 +430,16 @@ public sealed class AiAgentService
                     return new LoopHit(cleaned, providerLabel);
                 }
 
-                // 有些模型 content 空但有 reasoning —— 视为失败
+                // content 空：finish_reason=length 时加 token 再试一次；否则立刻失败，禁止空转
+                if (string.Equals(parsed.FinishReason, "length", StringComparison.OrdinalIgnoreCase)
+                    && emptyContentRetries < 1)
+                {
+                    emptyContentRetries++;
+                    maxTokens = Math.Min(Math.Max(maxTokens * 2, 1600), 3200);
+                    progress?.Report("回复被截断，再补一刀…");
+                    continue;
+                }
+
                 return null;
             }
 
@@ -436,13 +459,23 @@ public sealed class AiAgentService
         }
     }
 
+    /// <summary>回灌历史时去掉 reasoning 字段，避免下一轮上下文膨胀拖慢。</summary>
+    private static JsonObject SanitizeAssistantMessageForHistory(JsonObject raw)
+    {
+        var clone = raw.DeepClone() as JsonObject ?? new JsonObject { ["role"] = "assistant" };
+        clone.Remove("reasoning");
+        clone.Remove("reasoning_content");
+        return clone;
+    }
+
     private sealed record ToolCall(string Id, string Name, string ArgumentsJson);
 
     private sealed record ParsedAssistant(
         string? Content,
         IReadOnlyList<ToolCall>? ToolCalls,
         JsonObject RawAssistantMessage,
-        bool ToolCallsFromContent = false);
+        bool ToolCallsFromContent = false,
+        string? FinishReason = null);
 
     private static ParsedAssistant? ParseAssistantMessage(string json)
     {
@@ -453,7 +486,10 @@ public sealed class AiAgentService
             if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
                 return null;
 
-            var message = choices[0].GetProperty("message");
+            var choice = choices[0];
+            var message = choice.GetProperty("message");
+            var finishReason = choice.TryGetProperty("finish_reason", out var fr) ? fr.GetString() : null;
+
             // 重建为 JsonObject 便于回灌
             var raw = JsonNode.Parse(message.GetRawText()) as JsonObject ?? new JsonObject { ["role"] = "assistant" };
             if (!raw.ContainsKey("role"))
@@ -514,7 +550,7 @@ public sealed class AiAgentService
             if (calls is { Count: 0 })
                 calls = null;
 
-            return new ParsedAssistant(content?.Trim(), calls, raw, fromContent);
+            return new ParsedAssistant(content?.Trim(), calls, raw, fromContent, finishReason);
         }
         catch
         {

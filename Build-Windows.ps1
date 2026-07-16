@@ -2,7 +2,9 @@
     [ValidateSet("win-x64", "win-arm64", "win-x86")]
     [string]$Runtime = "win-x64",
     [ValidateSet("Release", "Debug")]
-    [string]$Configuration = "Release"
+    [string]$Configuration = "Release",
+    # CI 传入 1.4.0.<run_number>，写入 FileVersion 供自动更新比较
+    [string]$VersionOverride = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,19 +53,32 @@ Remove-Item (Join-Path $DeliveryDirectory "版本校验.txt") -Force -ErrorActio
 New-Item $PublishDirectory -ItemType Directory -Force | Out-Null
 
 Write-Host "正在发布 $Runtime 自包含单文件……" -ForegroundColor Cyan
-& dotnet publish $ProjectFile `
-    --configuration $Configuration `
-    --runtime $Runtime `
-    --self-contained true `
-    --output $PublishDirectory `
-    -p:PublishSingleFile=true `
-    -p:IncludeNativeLibrariesForSelfExtract=true `
-    -p:EnableCompressionInSingleFile=true `
-    -p:PublishReadyToRun=true `
-    -p:PublishTrimmed=false `
-    -p:DebugType=None `
-    -p:DebugSymbols=false `
-    -p:RuntimeIdentifier=$Runtime
+$publishArgs = @(
+    $ProjectFile,
+    "--configuration", $Configuration,
+    "--runtime", $Runtime,
+    "--self-contained", "true",
+    "--output", $PublishDirectory,
+    "-p:PublishSingleFile=true",
+    "-p:IncludeNativeLibrariesForSelfExtract=true",
+    "-p:EnableCompressionInSingleFile=true",
+    "-p:PublishReadyToRun=true",
+    "-p:PublishTrimmed=false",
+    "-p:DebugType=None",
+    "-p:DebugSymbols=false",
+    "-p:RuntimeIdentifier=$Runtime"
+)
+if (-not [string]::IsNullOrWhiteSpace($VersionOverride)) {
+    if ($VersionOverride -notmatch '^\d+\.\d+\.\d+(\.\d+)?$') {
+        throw "VersionOverride 格式无效：$VersionOverride"
+    }
+    Write-Host "写入版本 $VersionOverride" -ForegroundColor DarkGray
+    $publishArgs += "-p:Version=$VersionOverride"
+    $publishArgs += "-p:FileVersion=$VersionOverride"
+    $publishArgs += "-p:AssemblyVersion=$VersionOverride"
+    $publishArgs += "-p:InformationalVersion=$VersionOverride"
+}
+& dotnet publish @publishArgs
 
 if ($LASTEXITCODE -ne 0) {
     throw "dotnet publish 失败。"
@@ -100,26 +115,29 @@ if (Test-Path $ReadmeSrc) {
 
 $Hash = (Get-FileHash $EnglishExe -Algorithm SHA256).Hash
 $CheckPath = Join-Path $DeliveryDirectory "版本校验-$Runtime.txt"
+# 版本号：优先 VersionOverride（CI），否则 csproj
+$Csproj = Join-Path $ProjectRoot "BunnyCompanion\BunnyCompanion.csproj"
+$Ver = $VersionOverride
+if ([string]::IsNullOrWhiteSpace($Ver) -and (Test-Path $Csproj)) {
+    $m = [regex]::Match((Get-Content $Csproj -Raw), '<Version>([^<]+)</Version>')
+    if ($m.Success) { $Ver = $m.Groups[1].Value.Trim() }
+}
+if ([string]::IsNullOrWhiteSpace($Ver) -or $Ver -notmatch '^\d+\.\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$') {
+    throw "无法确定有效版本号（VersionOverride / csproj）。"
+}
 $Line = @"
 [$Runtime]
 文件（中文名）：$FriendlyName
 文件（英文名）：$EnglishName
 大小：$SizeMb MB
 SHA256：$Hash
+SHA256=$Hash
+$EnglishName  SHA256=$Hash
 构建时间：$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+版本：$Ver
 
 "@
-# 版本号从 csproj 读取，避免与程序内不一致。每次覆盖当前 RID，杜绝重复构建累积旧哈希。
-$Csproj = Join-Path $ProjectRoot "BunnyCompanion\BunnyCompanion.csproj"
-$Ver = $null
-if (Test-Path $Csproj) {
-    $m = [regex]::Match((Get-Content $Csproj -Raw), '<Version>([^<]+)</Version>')
-    if ($m.Success) { $Ver = $m.Groups[1].Value.Trim() }
-}
-if ([string]::IsNullOrWhiteSpace($Ver) -or $Ver -notmatch '^\d+\.\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$') {
-    throw "无法从 BunnyCompanion.csproj 读取有效的 <Version>。"
-}
-$Header = "小申陪伴 $Ver（自包含 · 免装 .NET）`n每架构一个 EXE，请按电脑 CPU 选择下载。`n`n"
+$Header = "小申陪伴 $Ver（自包含 · 免装 .NET）`n每架构一个 EXE，请按电脑 CPU 选择下载。`n自动更新依赖本文件 SHA256，请勿手改。`n`n"
 Set-Content -LiteralPath $CheckPath -Value ($Header + $Line) -Encoding UTF8
 
 Write-Host "完成：$FriendlyExe / $EnglishExe （$SizeMb MB）" -ForegroundColor Green
