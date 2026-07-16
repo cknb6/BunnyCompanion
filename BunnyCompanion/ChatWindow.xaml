@@ -156,6 +156,11 @@
           </StackPanel>
 
           <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+            <!-- 右上角：随时开/关朗读；关时立即停止当前播放 -->
+            <Button x:Name="SoundToggleButton" Content="🔊" Style="{StaticResource WxIconButton}"
+                    ToolTip="声音开：点击关闭朗读"
+                    Click="SoundToggleButton_Click" FontSize="15"
+                    AutomationProperties.Name="切换朗读声音" />
             <Button Content="🗑" Style="{StaticResource WxIconButton}" ToolTip="清空对话"
                     Click="ClearButton_Click" FontSize="14" />
             <Button Content="—" Style="{StaticResource WxIconButton}" ToolTip="最小化"

@@ -34,6 +34,8 @@ public partial class ChatWindow : Window
     private CancellationTokenSource? _cts;
     private readonly List<PendingAttachment> _pending = [];
     private DateTime _lastTimeStampShown = DateTime.MinValue;
+    /// <summary>聊天窗内朗读开关（右上角按钮）；关时立刻 Stop 并不再读新回复。</summary>
+    private bool _chatSoundOn;
 
     private sealed class PendingAttachment
     {
@@ -64,8 +66,11 @@ public partial class ChatWindow : Window
         TitleText.Text = settings.PetName;
         Title = settings.PetName;
         Topmost = settings.AlwaysOnTop;
+        // 与全局「朗读回复」同步初始状态
+        _chatSoundOn = settings.TtsEnabled;
         Closed += (_, _) =>
         {
+            try { VoiceService.Stop(); } catch { /* ignore */ }
             _cts?.Cancel();
             _cts?.Dispose();
         };
@@ -74,6 +79,7 @@ public partial class ChatWindow : Window
     private void Window_Loaded(object sender, RoutedEventArgs e)
     {
         FitToScreen();
+        RefreshSoundToggleUi();
         AppendTimeIfNeeded(force: true);
         AppendBubble(
             _settings.PetName,
@@ -148,6 +154,43 @@ public partial class ChatWindow : Window
 
     private void MinimizeButton_Click(object sender, RoutedEventArgs e) =>
         WindowState = WindowState.Minimized;
+
+    /// <summary>右上角声音按钮：开 ↔ 关；关闭时立即停止当前朗读。</summary>
+    private void SoundToggleButton_Click(object sender, RoutedEventArgs e)
+    {
+        _chatSoundOn = !_chatSoundOn;
+        if (!_chatSoundOn)
+        {
+            try { VoiceService.Stop(); } catch { /* ignore */ }
+            AppendSystemTip("已关闭朗读声音。再点 🔇 可重新打开。");
+        }
+        else
+        {
+            // 同步打开全局朗读偏好，避免设置里关了却只在本窗开却无效
+            _settings.TtsEnabled = true;
+            AppendSystemTip("已打开朗读声音，之后回复会读出来～再点 🔊 可关闭。");
+        }
+
+        RefreshSoundToggleUi();
+    }
+
+    private void RefreshSoundToggleUi()
+    {
+        if (SoundToggleButton is null)
+            return;
+        if (_chatSoundOn)
+        {
+            SoundToggleButton.Content = "🔊";
+            SoundToggleButton.ToolTip = "声音开 · 点击关闭朗读（并停止当前播放）";
+            SoundToggleButton.Opacity = 1;
+        }
+        else
+        {
+            SoundToggleButton.Content = "🔇";
+            SoundToggleButton.ToolTip = "声音关 · 点击开启朗读";
+            SoundToggleButton.Opacity = 0.75;
+        }
+    }
 
     private void SendButton_Click(object sender, RoutedEventArgs e)
     {
@@ -1298,12 +1341,13 @@ public partial class ChatWindow : Window
         });
     }
 
-    /// <summary>开启 TTS 且非安静时段时，朗读回复（截断到合理长度，避免长文念太久）。</summary>
+    /// <summary>聊天窗声音开、且非安静时段时朗读回复。</summary>
     private void TrySpeakReply(string text)
     {
         try
         {
-            if (!_settings.TtsEnabled || string.IsNullOrWhiteSpace(text))
+            // 右上角 🔇 或全局关闭时不读
+            if (!_chatSoundOn || !_settings.TtsEnabled || string.IsNullOrWhiteSpace(text))
                 return;
             // 安静时段不朗读
             if (IsQuietNow())
