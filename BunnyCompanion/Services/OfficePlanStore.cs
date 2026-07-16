@@ -97,13 +97,37 @@ public sealed class OfficePlanStore
             if (step is null)
                 return $"错误：没有第 {index} 步（共 {_steps.Count} 步）。";
 
-            step.Status = ParseStatus(status);
+            // 空 status 默认 done；未知字符串拒绝，避免误勾完成
+            var raw = (status ?? "").Trim();
+            if (string.IsNullOrEmpty(raw))
+                raw = "done";
+            if (!TryParseStatus(raw, out var st))
+            {
+                return $"错误：未知 status「{status}」。请用 done / failed / skip / pending。";
+            }
+
+            step.Status = st;
             if (!string.IsNullOrWhiteSpace(note))
                 step.Note = note.Trim();
             TrySaveUnlocked();
         }
 
         return StatusText();
+    }
+
+    /// <summary>清空计划（换任务 / 清对话 / 切模式时调用）。</summary>
+    public string ClearPlan(string? reason = null)
+    {
+        lock (_gate)
+        {
+            _title = "";
+            _steps.Clear();
+            TrySaveUnlocked();
+        }
+
+        return string.IsNullOrWhiteSpace(reason)
+            ? "办公计划已清空。"
+            : "办公计划已清空（" + reason.Trim() + "）。";
     }
 
     public string StatusText()
@@ -157,15 +181,7 @@ public sealed class OfficePlanStore
         return "# 当前办公计划（须对照推进）\n" + StatusText();
     }
 
-    public void Clear()
-    {
-        lock (_gate)
-        {
-            _title = "";
-            _steps.Clear();
-            TrySaveUnlocked();
-        }
-    }
+    public void Clear() => ClearPlan(null);
 
     /// <summary>解析步骤列表：JSON 数组 / 换行 / | 分隔。</summary>
     public static List<string> ParseSteps(string? raw)
@@ -225,17 +241,31 @@ public sealed class OfficePlanStore
         return result;
     }
 
-    public static OfficePlanStepStatus ParseStatus(string? status)
+    public static OfficePlanStepStatus ParseStatus(string? status) =>
+        TryParseStatus(status, out var st) ? st : OfficePlanStepStatus.Pending;
+
+    /// <summary>解析步骤状态；无法识别时返回 false（调用方应拒绝误勾选）。</summary>
+    public static bool TryParseStatus(string? status, out OfficePlanStepStatus result)
     {
-        var s = (status ?? "done").Trim().ToLowerInvariant();
-        return s switch
+        var s = (status ?? "").Trim().ToLowerInvariant();
+        switch (s)
         {
-            "done" or "ok" or "complete" or "completed" or "完成" or "x" => OfficePlanStepStatus.Done,
-            "failed" or "fail" or "error" or "失败" or "!" => OfficePlanStepStatus.Failed,
-            "skip" or "skipped" or "跳过" or "-" => OfficePlanStepStatus.Skipped,
-            "pending" or "todo" or "待做" or "" => OfficePlanStepStatus.Pending,
-            _ => OfficePlanStepStatus.Done,
-        };
+            case "done" or "ok" or "complete" or "completed" or "完成" or "x":
+                result = OfficePlanStepStatus.Done;
+                return true;
+            case "failed" or "fail" or "error" or "失败" or "!":
+                result = OfficePlanStepStatus.Failed;
+                return true;
+            case "skip" or "skipped" or "跳过" or "-":
+                result = OfficePlanStepStatus.Skipped;
+                return true;
+            case "pending" or "todo" or "待做" or "":
+                result = OfficePlanStepStatus.Pending;
+                return true;
+            default:
+                result = OfficePlanStepStatus.Pending;
+                return false;
+        }
     }
 
     private void TryLoad()

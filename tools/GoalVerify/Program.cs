@@ -435,6 +435,24 @@ void Fail(string msg)
         Fail("plan_tick 状态标记缺失");
     else Ok("plan_tick 状态 OK");
 
+    var badTick = store.Tick(3, "finished_typo", null);
+    if (!badTick.Contains("未知 status", StringComparison.Ordinal))
+        Fail("未知 status 应拒绝而非默认完成");
+    else Ok("未知 status 拒绝 OK");
+
+    if (!OfficePlanStore.TryParseStatus("done", out var ps) || ps != OfficePlanStepStatus.Done)
+        Fail("TryParseStatus done");
+    if (OfficePlanStore.TryParseStatus("not-a-status", out _))
+        Fail("未知 status TryParse 应 false");
+    else Ok("TryParseStatus 边界 OK");
+
+    var cleared = store.ClearPlan("测试清空");
+    if (store.HasPlan || !cleared.Contains("清空", StringComparison.Ordinal))
+        Fail("ClearPlan 应清空");
+    else Ok("plan_clear / ClearPlan OK");
+
+    // 再设计划测落盘
+    store.SetPlan("持久化测", "步骤A\n步骤B");
     // 落盘再读
     var store2 = new OfficePlanStore(planPath);
     if (!store2.HasPlan) Fail("计划应持久化");
@@ -478,12 +496,17 @@ void Fail(string msg)
     else
     {
         var tk = File.ReadAllText(toolkitPath);
-        foreach (var name in new[] { "plan_set", "plan_tick", "batch_move", "batch_rename", "web_search_results" })
+        foreach (var name in new[] { "plan_set", "plan_tick", "plan_clear", "batch_move", "batch_rename", "web_search_results", "confirm" })
         {
-            if (!tk.Contains("\"" + name + "\"", StringComparison.Ordinal))
+            if (!tk.Contains("\"" + name + "\"", StringComparison.Ordinal)
+                && !tk.Contains(name, StringComparison.Ordinal))
                 Fail("工具箱缺少 " + name);
         }
-        Ok("办公工具定义 plan/batch/web_search_results 存在");
+        if (!tk.Contains("AllowBatchExecute", StringComparison.Ordinal)
+            && !tk.Contains("BatchPreviewGate", StringComparison.Ordinal))
+            Fail("batch 执行门闩缺失");
+        else
+            Ok("办公工具定义 + batch 门闩存在");
     }
 
     var promptPath = Path.Combine(repoRoot, "BunnyCompanion", "Services", "AgentSystemPrompt.cs");

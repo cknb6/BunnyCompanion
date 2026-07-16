@@ -94,7 +94,8 @@ public partial class ChatWindow : Window
 
     private void ModeToggleButton_Click(object sender, RoutedEventArgs e)
     {
-        _settings.AgentMode = _settings.IsOfficeMode ? "companion" : "office";
+        var toOffice = !_settings.IsOfficeMode;
+        _settings.AgentMode = toOffice ? "office" : "companion";
         _settings.Normalize();
         try
         {
@@ -102,12 +103,39 @@ public partial class ChatWindow : Window
         }
         catch { /* ignore */ }
 
+        // 切模式时清空旧计划，避免待办污染新场景
+        try
+        {
+            CompanionRuntime.OfficePlan.ClearPlan(toOffice ? "进入办公模式" : "切回陪伴模式");
+        }
+        catch { /* ignore */ }
+
         RefreshModeToggleUi();
         var msg = _settings.IsOfficeMode
-            ? "已切换到【办公 Agent】模式。\n复杂任务我会先 plan_set，再多步调用本机工具；批量操作默认先预览。\n说「整理桌面 PDF / 写文件 / 搜网页摘要」试试看～"
+            ? "已切换到【办公 Agent】模式。\n复杂任务我会先 plan_set，再多步调用本机工具；批量操作默认先预览，确认后再执行。\n说「整理桌面 PDF / 写文件 / 搜网页摘要」试试看～"
             : "已切回【陪伴模式】。撒娇闲聊、天气关心更轻快；需要干活再点 🛠。";
         AppendSystemTip(msg);
         StatusText.Text = _settings.IsOfficeMode ? "办公 Agent" : "在线";
+    }
+
+    /// <summary>办公芯片文案命中时自动切到办公模式，避免仍用陪伴 6 轮预算。</summary>
+    private void EnsureOfficeModeForTask(string text)
+    {
+        if (_settings.IsOfficeMode || string.IsNullOrWhiteSpace(text))
+            return;
+        if (!text.Contains("办公", StringComparison.Ordinal)
+            && !text.Contains("plan_set", StringComparison.OrdinalIgnoreCase)
+            && !text.Contains("batch_", StringComparison.OrdinalIgnoreCase)
+            && !text.Contains("web_search_results", StringComparison.OrdinalIgnoreCase)
+            && !text.Contains("整理桌面", StringComparison.Ordinal)
+            && !text.Contains("批量", StringComparison.Ordinal))
+            return;
+
+        _settings.AgentMode = "office";
+        _settings.Normalize();
+        try { new SettingsService().Save(_settings); } catch { /* ignore */ }
+        RefreshModeToggleUi();
+        AppendSystemTip("已自动切换到【办公 Agent】以执行该任务。");
     }
 
     private void RefreshModeToggleUi()
@@ -257,12 +285,14 @@ public partial class ChatWindow : Window
         if (_busy)
             return;
         _agent.ClearHistory();
+        try { CompanionRuntime.OfficePlan.ClearPlan("清空对话"); } catch { /* ignore */ }
         ChatPanel.Children.Clear();
         ClearPendingAttachments();
         _lastTimeStampShown = DateTime.MinValue;
         AppendTimeIfNeeded(force: true);
         AppendBubble(_settings.PetName, "好，刚才的先放下。我们重新开始聊～", isPet: true);
-        StatusText.Text = "在线";
+        RefreshModeToggleUi();
+        StatusText.Text = _settings.IsOfficeMode ? "办公 Agent" : "在线";
     }
 
     private void ClearAttachments_Click(object sender, RoutedEventArgs e) =>
@@ -791,6 +821,7 @@ public partial class ChatWindow : Window
             return;
         if (sender is Button { Tag: string text })
         {
+            EnsureOfficeModeForTask(text);
             InputBox.Text = text;
             _ = SendAsync(includeDesktop: DesktopCheck.IsChecked == true);
         }
@@ -806,6 +837,7 @@ public partial class ChatWindow : Window
         if (text.Length == 0 && !includeDesktop && !hasAttach)
             return;
 
+        EnsureOfficeModeForTask(text);
         InputBox.Clear();
         var attachments = SnapshotAttachments();
         ClearPendingAttachments();

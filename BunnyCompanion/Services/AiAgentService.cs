@@ -555,9 +555,12 @@ public sealed class AiAgentService
                     {
                         ["role"] = "user",
                         ["content"] = officeMode
-                            ? "工具结果已回灌。若计划仍有未完成步骤或任务未落地：继续调用工具（plan_tick / 文件 / 命令等）。" +
-                              "仅当任务真正完成或无法继续时，才用简体中文做最终交付：" +
-                              "做了什么、关键路径、未完成项。禁止 <tool_call>/XML/JSON 伪代码；不要复述原始日志。"
+                            ? "工具结果已回灌。" +
+                              "可读/搜索/plan 步骤可继续；" +
+                              "若刚完成 batch_* 预览（dry_run=true）：必须先把清单用中文给用户看并停下来等确认，禁止同轮 dry_run=false。" +
+                              "真正执行批量须用户确认后（或用户已说直接执行时 confirm=true）。" +
+                              "换任务用 plan_clear 或 plan_set 覆盖。" +
+                              "任务真正完成时再最终交付：做了什么、路径、未完成项。禁止 tool XML。"
                             : "工具结果已全部给你。请用温柔简体中文直接回答用户：" +
                               "总结要点、说明已做了什么；禁止输出 <tool_call>、<function>、XML 或 JSON 伪代码；" +
                               "不要重复工具原始日志，改成口语。",

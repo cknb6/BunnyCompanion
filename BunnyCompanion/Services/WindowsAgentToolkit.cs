@@ -251,6 +251,9 @@ public static class WindowsAgentToolkit
         Tool("plan_status",
             "【办公】查看当前计划进度与勾选状态。",
             new JsonObject()),
+        Tool("plan_clear",
+            "【办公】清空当前计划（用户换任务、任务取消、或切回陪伴前调用）。",
+            Props(("reason", "string", "可选说明"))),
         Tool("batch_search",
             "【办公】在目录中按通配符批量列出匹配文件（表格化结果）。",
             Props(
@@ -259,22 +262,26 @@ public static class WindowsAgentToolkit
                 ("max_results", "integer", "最多条数，默认 80")),
             required: ["root", "pattern"]),
         Tool("batch_move",
-            "【办公】批量移动匹配文件到目标目录。默认 dry_run=true 只预览；确认后 dry_run=false 执行。",
+            "【办公】批量移动。默认 dry_run=true 只预览。" +
+            "真正执行须：先成功 dry_run 预览同一 root/pattern/destination，且用户确认后 dry_run=false；" +
+            "或用户明确说「直接执行」时传 confirm=true。禁止同轮预览后立刻执行。",
             Props(
                 ("root", "string", "搜索根目录"),
                 ("pattern", "string", "通配符"),
                 ("destination", "string", "目标目录"),
                 ("dry_run", "boolean", "true=只列清单不移动，默认 true"),
+                ("confirm", "boolean", "用户已明确同意执行时 true；与成功预览二选一"),
                 ("max_files", "integer", "最多处理数，默认 50")),
             required: ["root", "pattern", "destination"]),
         Tool("batch_rename",
-            "【办公】批量重命名：文件名中 replace_from → replace_to。默认 dry_run=true。",
+            "【办公】批量重命名。默认 dry_run=true。真正执行规则同 batch_move（须先预览或 confirm=true）。",
             Props(
                 ("root", "string", "根目录"),
                 ("pattern", "string", "通配，如 *.txt"),
                 ("replace_from", "string", "文件名中要替换的子串"),
                 ("replace_to", "string", "替换为"),
                 ("dry_run", "boolean", "true=预览，默认 true"),
+                ("confirm", "boolean", "用户已明确同意执行时 true"),
                 ("max_files", "integer", "最多处理数，默认 50")),
             required: ["root", "pattern", "replace_from"]),
         Tool("web_search_results",
@@ -344,14 +351,15 @@ public static class WindowsAgentToolkit
                     string.IsNullOrWhiteSpace(Str(args, "status")) ? "done" : Str(args, "status"),
                     Str(args, "note")),
                 "plan_status" => CompanionRuntime.OfficePlan.StatusText(),
+                "plan_clear" => CompanionRuntime.OfficePlan.ClearPlan(Str(args, "reason")),
                 "batch_search" => BatchSearch(Str(args, "root"), Str(args, "pattern"), Int(args, "max_results", 80)),
                 "batch_move" => BatchMove(
                     Str(args, "root"), Str(args, "pattern"), Str(args, "destination"),
-                    Bool(args, "dry_run", true), Int(args, "max_files", 50)),
+                    Bool(args, "dry_run", true), Bool(args, "confirm", false), Int(args, "max_files", 50)),
                 "batch_rename" => BatchRename(
                     Str(args, "root"), Str(args, "pattern"),
                     Str(args, "replace_from"), Str(args, "replace_to"),
-                    Bool(args, "dry_run", true), Int(args, "max_files", 50)),
+                    Bool(args, "dry_run", true), Bool(args, "confirm", false), Int(args, "max_files", 50)),
                 "web_search_results" => await BrowserService.SearchResultsAsync(
                         Str(args, "query"),
                         string.IsNullOrWhiteSpace(Str(args, "engine")) ? "bing" : Str(args, "engine"),
@@ -1473,7 +1481,33 @@ public static class WindowsAgentToolkit
         return sb.ToString().Trim();
     }
 
-    private static string BatchMove(string root, string pattern, string dest, bool dryRun, int maxFiles)
+    /// <summary>成功 dry_run 预览指纹 → 允许后续真正执行（30 分钟内）。</summary>
+    private static readonly ConcurrentDictionary<string, DateTime> BatchPreviewGate = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan BatchPreviewTtl = TimeSpan.FromMinutes(30);
+
+    private static string BatchOpKey(string op, string root, string pattern, string extra) =>
+        op + "|" + root + "|" + pattern + "|" + extra;
+
+    private static bool AllowBatchExecute(string key, bool confirm, out string denyReason)
+    {
+        denyReason = "";
+        if (confirm)
+            return true;
+        if (BatchPreviewGate.TryGetValue(key, out var at) && DateTime.UtcNow - at < BatchPreviewTtl)
+            return true;
+        denyReason =
+            "已拒绝真正执行：须先对同一参数成功 dry_run=true 预览，" +
+            "并等用户确认后再 dry_run=false；或用户明确说「直接执行」时传 confirm=true。" +
+            "请先预览并停下来把清单给用户看。";
+        return false;
+    }
+
+    private static void RememberBatchPreview(string key)
+    {
+        BatchPreviewGate[key] = DateTime.UtcNow;
+    }
+
+    private static string BatchMove(string root, string pattern, string dest, bool dryRun, bool confirm, int maxFiles)
     {
         root = Expand(string.IsNullOrWhiteSpace(root) ? "桌面" : root);
         dest = Expand(dest);
@@ -1482,6 +1516,10 @@ public static class WindowsAgentToolkit
         if (string.IsNullOrWhiteSpace(dest))
             return "错误：destination 为空";
         maxFiles = Math.Clamp(maxFiles, 1, 100);
+        var gateKey = BatchOpKey("move", root, pattern, dest);
+        if (!dryRun && !AllowBatchExecute(gateKey, confirm, out var deny))
+            return deny;
+
         var files = EnumerateMatchFiles(root, pattern, maxFiles);
         var sb = new StringBuilder();
         sb.AppendLine(dryRun
@@ -1524,13 +1562,15 @@ public static class WindowsAgentToolkit
             }
         }
 
+        if (dryRun && ok > 0)
+            RememberBatchPreview(gateKey);
         sb.AppendLine(dryRun
-            ? $"预览完毕。确认后请再调用 batch_move(dry_run=false)。成功预览 {ok}。"
+            ? $"预览完毕（{ok} 项）。请把清单给用户确认；用户同意后再 batch_move(dry_run=false)。禁止同轮立刻执行。"
             : $"完成：成功 {ok}，失败 {fail}。");
         return sb.ToString().Trim();
     }
 
-    private static string BatchRename(string root, string pattern, string from, string to, bool dryRun, int maxFiles)
+    private static string BatchRename(string root, string pattern, string from, string to, bool dryRun, bool confirm, int maxFiles)
     {
         root = Expand(string.IsNullOrWhiteSpace(root) ? "桌面" : root);
         if (!Directory.Exists(root))
@@ -1539,6 +1579,10 @@ public static class WindowsAgentToolkit
             return "错误：replace_from 为空";
         to ??= "";
         maxFiles = Math.Clamp(maxFiles, 1, 100);
+        var gateKey = BatchOpKey("rename", root, pattern, from + "→" + to);
+        if (!dryRun && !AllowBatchExecute(gateKey, confirm, out var deny))
+            return deny;
+
         var files = EnumerateMatchFiles(root, pattern, maxFiles);
         var sb = new StringBuilder();
         sb.AppendLine(dryRun
@@ -1592,8 +1636,10 @@ public static class WindowsAgentToolkit
             }
         }
 
+        if (dryRun && ok > 0)
+            RememberBatchPreview(gateKey);
         sb.AppendLine(dryRun
-            ? $"预览 {ok} 项，跳过 {skip}。确认后 dry_run=false 执行。"
+            ? $"预览 {ok} 项，跳过 {skip}。用户确认后再 dry_run=false；禁止同轮立刻执行。"
             : $"完成：成功 {ok}，失败 {fail}，跳过 {skip}。");
         return sb.ToString().Trim();
     }
