@@ -62,8 +62,10 @@ BunnyCompanion/
 
 本地数据：`%LocalAppData%\BunnyCompanion\`
 - `settings.json` — 设置与爱心
-- `companion_memory.json` — 长期记忆（人物/偏好）
+- `companion_memory.json` — 结构化长期记忆（人物/偏好/备忘）
+- **`agent.md`** — 对话**自动摘要压缩**的 Markdown 长期记忆（滚动摘要 + 近期压缩 + 用户手写备注）；每轮聊天后更新，超长自动折叠
 - 一键卸载会删整个配置目录
+- 托盘：「打开长期记忆 agent.md」
 
 ## Agent 工具链（必须正确）
 

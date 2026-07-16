@@ -162,11 +162,13 @@
                     Background="#EDEDED" Padding="10,0,10,6">
         <StackPanel Orientation="Horizontal">
           <Button Content="看桌面" Style="{StaticResource WxChip}" Click="LookDesktop_Click" />
+          <Button Content="天气预警" Style="{StaticResource WxChip}" Click="QuickChip_Click" Tag="帮我查当前位置天气，重点说高温和降水预警" />
           <Button Content="我在哪" Style="{StaticResource WxChip}" Click="QuickChip_Click" Tag="我现在在哪？顺便告诉我外面天气怎样" />
-          <Button Content="今天天气" Style="{StaticResource WxChip}" Click="QuickChip_Click" Tag="帮我查一下今天天气，要不要加衣服" />
+          <Button Content="星座运势" Style="{StaticResource WxChip}" Click="QuickChip_Click" Tag="按我的生日或星座做个趣味星座分析，再给今日运势" />
+          <Button Content="设个提醒" Style="{StaticResource WxChip}" Click="QuickChip_Click" Tag="提醒我30分钟后起来喝水活动一下" />
+          <Button Content="今日卡片" Style="{StaticResource WxChip}" Click="QuickChip_Click" Tag="给我一张今日陪伴卡，穿搭和习惯都来点" />
           <Button Content="列桌面文件" Style="{StaticResource WxChip}" Click="QuickChip_Click" Tag="列出我桌面上的文件和文件夹" />
           <Button Content="想你了" Style="{StaticResource WxChip}" Click="QuickChip_Click" Tag="想你了" />
-          <Button Content="帮写代码" Style="{StaticResource WxChip}" Click="QuickChip_Click" Tag="帮我写一段 Python 读取 CSV 并统计缺失值" />
           <Button Content="好累呀" Style="{StaticResource WxChip}" Click="QuickChip_Click" Tag="好累呀" />
         </StackPanel>
       </ScrollViewer>

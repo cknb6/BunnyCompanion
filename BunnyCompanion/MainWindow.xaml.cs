@@ -90,6 +90,8 @@ public partial class MainWindow : Window
     private double _dragLastDeltaY;
     private string? _lastMouseReactionAction;
     private DateTime _lastPersonBubbleAt = DateTime.MinValue;
+    private DateOnly? _lastWeatherBubbleDay;
+    private DateTime _lastMemoCheck = DateTime.MinValue;
 
     private bool IsFocusActive => _focusEnd is { } end && end > DateTime.Now;
     private bool IsExclusiveBusy => DateTime.Now < _exclusiveUntil || _isDragging || _introPlaying;
@@ -757,8 +759,8 @@ public partial class MainWindow : Window
         if (!_settings.ShowSpeechBubbles)
             return;
 
-        // 偶尔提起记忆中的人物（有记忆 + 概率 + 节流，不是每次）
-        if (TryShowPersonMemoryBubble())
+        // 偶尔：到期外备忘轻推 / 人物印象 / 偏好记忆（均非次次）
+        if (TryShowMemoryAmbientBubble())
             return;
 
         var line = GetAmbientLineForAction(actionKey);
@@ -773,15 +775,17 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// 人物记忆气泡：至少间隔 4 分钟，且由 Memory 内部概率控制「偶尔」。
+    /// 记忆向环境气泡：备忘轻推 / 人物 / 偏好，共用 3.5 分钟节流。
     /// </summary>
-    private bool TryShowPersonMemoryBubble()
+    private bool TryShowMemoryAmbientBubble()
     {
-        if (DateTime.Now - _lastPersonBubbleAt < TimeSpan.FromMinutes(4))
+        if (DateTime.Now - _lastPersonBubbleAt < TimeSpan.FromMinutes(3.5))
             return false;
         try
         {
-            var line = _agent.Memory.TryPickPersonBubble(_settings.PartnerName, probability: 0.28);
+            string? line = _agent.Memory.TryPickMemoNudgeBubble(_settings.PartnerName, probability: 0.22)
+                           ?? _agent.Memory.TryPickPersonBubble(_settings.PartnerName, probability: 0.26)
+                           ?? _agent.Memory.TryPickFactBubble(_settings.PartnerName, probability: 0.16);
             if (string.IsNullOrWhiteSpace(line))
                 return false;
             _lastPersonBubbleAt = DateTime.Now;
@@ -1268,6 +1272,27 @@ public partial class MainWindow : Window
         if (IsFocusActive || (IsExclusiveBusy && !_isWalking))
             return;
 
+        // 备忘到期优先（最多一条气泡，避免刷屏）
+        if (DateTime.Now - _lastMemoCheck >= TimeSpan.FromSeconds(20))
+        {
+            _lastMemoCheck = DateTime.Now;
+            try
+            {
+                var due = _agent.Memory.PopDueMemos();
+                if (due.Count > 0)
+                {
+                    var m = due[0];
+                    StopWalking(recover: false);
+                    PlayAction("reminder", exclusiveSeconds: 3);
+                    ShowMessage($"⏰ 提醒：{m.Text}", 6.5);
+                    PlaySound(SystemSounds.Exclamation);
+                    CheckSpecialDate(force: false);
+                    return;
+                }
+            }
+            catch { /* ignore */ }
+        }
+
         if (_settings.WaterReminderMinutes > 0
             && DateTime.Now - _lastWaterReminder >= TimeSpan.FromMinutes(_settings.WaterReminderMinutes))
         {
@@ -1284,7 +1309,48 @@ public partial class MainWindow : Window
             PlayAction("stretch", exclusiveSeconds: 3.5);
             ShowMessage("眼睛离开屏幕一会儿，伸个懒腰吧。", 5);
         }
+        else
+        {
+            // 上午一次轻量天气关怀（异步，不阻塞 UI）
+            TryMorningWeatherBubble();
+        }
         CheckSpecialDate(force: false);
+    }
+
+    private void TryMorningWeatherBubble()
+    {
+        var hour = DateTime.Now.Hour;
+        if (hour is < 8 or > 10) return;
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        if (_lastWeatherBubbleDay == today) return;
+        if (IsQuietNow() || Random.Shared.NextDouble() > 0.35) return;
+        _lastWeatherBubbleDay = today;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var report = await WindowsAgentToolkit.ExecuteAsync("get_weather", new System.Text.Json.Nodes.JsonObject(), CancellationToken.None)
+                    .ConfigureAwait(false);
+                // 只抽预警行做短气泡
+                var alertLines = report.Split('\n')
+                    .Where(l => l.Contains("高温", StringComparison.Ordinal) || l.Contains("降水", StringComparison.Ordinal)
+                                                                            || l.Contains("雷电", StringComparison.Ordinal))
+                    .Take(2)
+                    .Select(l => l.TrimStart('·', ' ', '\t'))
+                    .ToList();
+                var msg = alertLines.Count > 0
+                    ? "天气提醒：" + string.Join("；", alertLines)
+                    : null;
+                if (msg is null) return;
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (!IsPetVisibleActive || IsQuietNow()) return;
+                    ShowMessage(msg.Length > 70 ? msg[..69] + "…" : msg, 5.5);
+                    PlayAction("rain", exclusiveSeconds: 2);
+                });
+            }
+            catch { /* 网络失败静默 */ }
+        });
     }
 
     private void CheckSpecialDate(bool force)
@@ -1515,6 +1581,7 @@ public partial class MainWindow : Window
         AddMenuItem(_trayMenu.Items, "快捷键说明  (Ctrl+Shift+H)", (_, _) => ShowHotkeyHelp());
         AddMenuItem(_trayMenu.Items, "回到屏幕右下角", (_, _) => ResetPosition());
         AddMenuItem(_trayMenu.Items, "打开本地配置目录", (_, _) => OpenConfigDirectory());
+        AddMenuItem(_trayMenu.Items, "打开长期记忆 agent.md", (_, _) => OpenAgentMd());
         AddMenuItem(_trayMenu.Items, "关于", (_, _) => ShowAbout());
         _trayMenu.Items.Add(new Forms.ToolStripSeparator());
         AddMenuItem(_trayMenu.Items, "完全退出", (_, _) => ExitApplication());
@@ -1757,12 +1824,35 @@ public partial class MainWindow : Window
         }
     }
 
+    private void OpenAgentMd()
+    {
+        try
+        {
+            var path = _agent.AgentMd.FilePath;
+            _agent.AgentMd.EnsureFileExists();
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = path,
+                UseShellExecute = true,
+            });
+            ShowMessage("长期记忆 agent.md 已打开，可在「用户手写备注」区补充～", 3.5);
+        }
+        catch
+        {
+            MessageBox.Show(
+                $"无法打开 agent.md，请手动访问：\n{_agent.AgentMd.FilePath}",
+                "小申陪伴", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+    }
+
     private void ShowAbout()
     {
         var days = Math.Max(1, (DateTime.Today - _settings.FirstMetDate.Date).Days + 1);
         MessageBox.Show(
-            $"小申陪伴 1.1\n\n已经陪伴 {days} 天\n互动 {_settings.InteractionCount} 次\n爱心值 {_settings.Affection}\n\n中键或托盘「和我聊聊」打开多模态 Agent。\n在线不可用时自动切换本地中文陪伴。\n纪念日与设置保存在本机。",
-            "关于小申陪伴", MessageBoxButton.OK, MessageBoxImage.Information);
+            AppCredits.AboutBody(days, _settings.InteractionCount, _settings.Affection),
+            $"关于{AppCredits.ProductName} · {AppCredits.DevelopedByLine}",
+            MessageBoxButton.OK,
+            MessageBoxImage.Information);
     }
 
     private void SavePosition()

@@ -84,8 +84,71 @@ void Fail(string msg)
     if (hits is 0 or trials) Fail($"偶尔气泡退化 hits={hits}/{trials}");
     else Ok($"偶尔气泡 hits={hits}/{trials} (非0非全)");
 
+    // 备忘录
+    var memoDir = Path.Combine(scratch, "mem-memo");
+    if (Directory.Exists(memoDir)) Directory.Delete(memoDir, true);
+    var memMemo = new CompanionMemoryService(memoDir);
+    var rMemo = memMemo.IngestUserUtterance("提醒我30分钟后起来喝水");
+    if (rMemo.MemosAdded < 1 || memMemo.OpenMemoCount < 1) Fail("备忘未写入");
+    else Ok($"备忘写入 open={memMemo.OpenMemoCount}");
+    if (!CompanionMemoryService.TryParseMemo("提醒我明天下午3点开会", out var mt, out var due) || due is null)
+        Fail("备忘时间解析失败");
+    else Ok($"解析备忘 due={due:g} text={mt}");
+
+    // 到期弹出
+    memMemo.AddMemo("立刻事项", DateTime.Now.AddMinutes(-1));
+    var dueList = memMemo.PopDueMemos(DateTime.Now);
+    if (dueList.Count < 1) Fail("PopDueMemos 未弹出到期项");
+    else Ok("PopDueMemos OK count=" + dueList.Count);
+
     File.WriteAllText(Path.Combine(scratch, "memory-person.txt"),
-        $"people={mem2.PersonCount} facts={mem2.FactCount}\nprompt_len={prompt.Length}\nhits={hits}/{trials}\nalways={always}\n");
+        $"people={mem2.PersonCount} facts={mem2.FactCount} memos={memMemo.OpenMemoCount}\nprompt_len={prompt.Length}\nhits={hits}/{trials}\nalways={always}\n");
+}
+
+// ---------- 2a) agent.md 摘要压缩 ----------
+{
+    var dir = Path.Combine(scratch, "agent-md-data");
+    if (Directory.Exists(dir)) Directory.Delete(dir, true);
+    Directory.CreateDirectory(dir);
+    var md = new LocalAgentMdStore(dir);
+    if (!File.Exists(md.FilePath)) Fail("agent.md 未创建");
+    else Ok("agent.md 路径 " + md.FilePath);
+
+    for (var i = 0; i < 22; i++)
+        md.AppendTurnDigest($"用户说了第{i}轮：我朋友小美喜欢喝茶", $"小申回复第{i}轮：记下了喝茶和朋友", "宝宝");
+    md.SyncStructured("- 测试结构化\n- 朋友小美");
+    var raw = md.ReadRaw();
+    if (!raw.Contains("滚动摘要", StringComparison.Ordinal)) Fail("缺滚动摘要区");
+    else Ok("含滚动摘要区");
+    if (!raw.Contains("近期对话压缩", StringComparison.Ordinal)) Fail("缺近期压缩区");
+    else Ok("含近期压缩区");
+    // 22 轮应触发压缩，滚动区或近期被折叠
+    if (!raw.Contains("小美", StringComparison.Ordinal) && !raw.Contains("喝茶", StringComparison.Ordinal)
+        && !raw.Contains("压缩", StringComparison.Ordinal))
+        Fail("摘要未留下痕迹");
+    else Ok("摘要压缩有内容");
+
+    var inject = md.FormatForSystemPrompt(3000);
+    if (inject.Length < 50) Fail("注入块过短");
+    else Ok($"agent.md 注入长度={inject.Length}");
+
+    File.WriteAllText(Path.Combine(scratch, "agent-md.txt"), raw[..Math.Min(2000, raw.Length)] + "\n---\ninject_len=" + inject.Length);
+}
+
+// ---------- 2b) 星座 / 今日卡 ----------
+{
+    var z = ZodiacService.Analyze("1999-08-15", "宝宝");
+    if (!z.Contains("处女座", StringComparison.Ordinal) && !z.Contains("星座", StringComparison.Ordinal))
+        Fail("星座分析缺星座名: " + z[..Math.Min(80, z.Length)]);
+    else Ok("星座分析含内容");
+    if (!z.Contains("今日运势", StringComparison.Ordinal)) Fail("缺今日运势节");
+    else Ok("星座今日运势节 OK");
+
+    var card = DailyCompanion.BuildDailyCard("宝宝");
+    if (!card.Contains("今日陪伴卡", StringComparison.Ordinal)) Fail("陪伴卡格式不对");
+    else Ok("DailyCompanion 卡片 OK");
+
+    File.WriteAllText(Path.Combine(scratch, "zodiac-daily.txt"), z + "\n---\n" + card + "\n");
 }
 
 // ---------- 3) 鼠标反应池 ----------

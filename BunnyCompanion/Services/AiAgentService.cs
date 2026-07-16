@@ -40,16 +40,23 @@ public sealed class AiAgentService
     private readonly List<ChatTurn> _history = [];
     private readonly object _gate = new();
     private readonly CompanionMemoryService _memory;
+    private readonly LocalAgentMdStore _agentMd;
 
     private sealed record ChatTurn(string Role, string Text);
 
-    public AiAgentService(CompanionMemoryService? memory = null)
+    public AiAgentService(CompanionMemoryService? memory = null, LocalAgentMdStore? agentMd = null)
     {
-        _memory = memory ?? new CompanionMemoryService();
+        _memory = memory ?? CompanionRuntime.Memory;
+        CompanionRuntime.Memory = _memory;
+        _agentMd = agentMd ?? CompanionRuntime.AgentMd;
+        CompanionRuntime.AgentMd = _agentMd;
     }
 
     /// <summary>长期记忆服务（人物/偏好），供气泡与自检使用。</summary>
     public CompanionMemoryService Memory => _memory;
+
+    /// <summary>本地 agent.md（对话摘要压缩）。</summary>
+    public LocalAgentMdStore AgentMd => _agentMd;
 
     public void ClearHistory()
     {
@@ -124,6 +131,14 @@ public sealed class AiAgentService
         var memoryBlock = _memory.FormatForSystemPrompt();
         if (!string.IsNullOrWhiteSpace(memoryBlock))
             systemPrompt += "\n\n" + memoryBlock;
+        // 本地 agent.md：滚动摘要 + 近期压缩对话（长期记忆主载体之一）
+        try
+        {
+            var agentMdBlock = _agentMd.FormatForSystemPrompt(maxChars: 5500);
+            if (!string.IsNullOrWhiteSpace(agentMdBlock) && agentMdBlock.Length > 80)
+                systemPrompt += "\n\n" + agentMdBlock;
+        }
+        catch { /* ignore */ }
 
         var toolTrace = new List<string>();
 
@@ -153,7 +168,7 @@ public sealed class AiAgentService
             extra: node => node["reasoning_effort"] = AiConfig.StepEffort,
             cancellationToken: cancellationToken).ConfigureAwait(false);
         if (step is { } s)
-            return Finalize((s.Text, InferAction(s.Text)), settings, imageBytes is not null, s.Provider, toolTrace);
+            return Finalize((s.Text, InferAction(s.Text)), settings, imageBytes is not null, s.Provider, toolTrace, userText: text);
 
         // 2) OpenRouter 免费 + tools（部分模型可能忽略 tools）
         foreach (var model in imageBytes is not null
@@ -177,7 +192,7 @@ public sealed class AiAgentService
                 extra: null,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             if (hit is { } h)
-                return Finalize((h.Text, InferAction(h.Text)), settings, imageBytes is not null, h.Provider, toolTrace);
+                return Finalize((h.Text, InferAction(h.Text)), settings, imageBytes is not null, h.Provider, toolTrace, userText: text);
         }
 
         // 3) 纯文本再试阶跃（无 tools）
@@ -197,7 +212,7 @@ public sealed class AiAgentService
             extra: node => node["reasoning_effort"] = AiConfig.StepEffort,
             cancellationToken: cancellationToken).ConfigureAwait(false);
         if (stepPlain is { } sp)
-            return Finalize((sp.Text, InferAction(sp.Text)), settings, imageBytes is not null, sp.Provider, toolTrace);
+            return Finalize((sp.Text, InferAction(sp.Text)), settings, imageBytes is not null, sp.Provider, toolTrace, userText: text);
 
         // 4) 本地关键词 + 预取数据拼装
         var offline = ChatReplyService.Reply(text, settings, offlineMode: true, desktopRequested: wantDesktop && imageBytes is null);
@@ -211,7 +226,7 @@ public sealed class AiAgentService
         else
             offlineText = $"{offlineText}\n（网络不太顺，我先用本地模式陪你。）";
 
-        return Finalize((offlineText, offline.ActionKey), settings, false, "本地", toolTrace);
+        return Finalize((offlineText, offline.ActionKey), settings, false, "本地", toolTrace, userText: text);
     }
 
     private sealed record LoopHit(string Text, string Provider);
@@ -463,8 +478,11 @@ public sealed class AiAgentService
     {
         var wantLoc = ContainsAny(text, "我在哪", "在哪里", "定位", "什么地方", "哪个城市", "where am i", "我的位置");
         var wantWeather = ContainsAny(text, "天气", "气温", "冷不冷", "热不热", "下雨", "带伞", "weather",
-            "高温", "降水", "预警", "出门", "加衣服", "降温");
-        if (!wantLoc && !wantWeather)
+            "高温", "降水", "预警", "出门", "加衣服", "降温", "紫外线");
+        var wantZodiac = ContainsAny(text, "星座", "运势", "白羊", "金牛", "双子", "巨蟹", "狮子", "处女",
+            "天秤", "天蝎", "射手", "摩羯", "水瓶", "双鱼");
+        var wantDaily = ContainsAny(text, "今日运势", "陪伴卡", "今日卡片", "穿搭建议");
+        if (!wantLoc && !wantWeather && !wantZodiac && !wantDaily)
             return null;
 
         var sb = new StringBuilder();
@@ -482,6 +500,21 @@ public sealed class AiAgentService
             var weather = await WindowsAgentToolkit.ExecuteAsync("get_weather", new JsonObject(), ct).ConfigureAwait(false);
             sb.AppendLine("## get_weather");
             sb.AppendLine(weather);
+        }
+
+        if (wantZodiac)
+        {
+            progress?.Report("正在算星座…");
+            var q = text;
+            var z = ZodiacService.Analyze(q, "宝宝");
+            sb.AppendLine("## zodiac_analyze");
+            sb.AppendLine(z);
+        }
+
+        if (wantDaily)
+        {
+            sb.AppendLine("## daily_card");
+            sb.AppendLine(DailyCompanion.BuildDailyCard("宝宝"));
         }
 
         return sb.ToString().Trim();
@@ -530,7 +563,8 @@ public sealed class AiAgentService
         PetSettings settings,
         bool usedImage,
         string provider,
-        List<string>? toolTrace)
+        List<string>? toolTrace,
+        string? userText = null)
     {
         var text = CleanReply(reply.Text);
         if (text.Length == 0)
@@ -540,6 +574,17 @@ public sealed class AiAgentService
         {
             _history.Add(new ChatTurn("assistant", text));
             TrimHistoryUnlocked();
+        }
+
+        // 每轮结束后写入本地 agent.md（摘要压缩 / 超长自动折叠）
+        try
+        {
+            _agentMd.AppendTurnDigest(userText ?? "", text, settings.PartnerName);
+            CompanionRuntime.SyncAgentMdFromMemory();
+        }
+        catch
+        {
+            // 写 agent.md 失败不阻断回复
         }
 
         var action = string.IsNullOrWhiteSpace(reply.ActionKey) ? InferAction(text) : reply.ActionKey;

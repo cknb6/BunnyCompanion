@@ -48,8 +48,37 @@ public static class WindowsAgentToolkit
             "根据公网 IP 与本机网络信息推断当前位置（城市/地区/运营商/IP）。用户问「我在哪」「定位」时必须调用。",
             new JsonObject()),
         Tool("get_weather",
-            "查询实时天气。可指定 city；不指定则先按 IP 定位再查天气。用户问天气时必须调用。",
+            "查询实时天气与高温/降水等预警。可指定 city；不指定则 IP 定位。用户问天气/预警/带伞时必须调用。",
             Props(("city", "string", "城市名，如 北京、上海、深圳；可空则自动定位"))),
+        Tool("memo_add",
+            "添加备忘/提醒。text 为事项；due 可选本地时间（如 2026-07-16 15:30 或 30分钟后/明天9点 口语会由上层解析，工具侧优先 ISO）。",
+            Props(
+                ("text", "string", "提醒内容"),
+                ("due", "string", "可选到期时间描述或 yyyy-MM-dd HH:mm")),
+            required: ["text"]),
+        Tool("memo_list",
+            "列出未完成备忘提醒。",
+            Props(("include_done", "boolean", "是否包含已完成，默认 false"))),
+        Tool("memo_done",
+            "将备忘标记完成。id 可为完整 id 或前缀，也可为正文关键词。",
+            Props(("id", "string", "备忘 id 前缀或正文关键词")),
+            required: ["id"]),
+        Tool("memory_list",
+            "查看长期记忆摘要（人物、偏好、星座、备忘）。",
+            new JsonObject()),
+        Tool("agent_md_read",
+            "读取本地 agent.md 长期记忆文件内容（自动摘要压缩后的 Markdown）。",
+            Props(("max_chars", "integer", "最多返回字符，默认 8000"))),
+        Tool("agent_md_path",
+            "返回本机 agent.md 的完整路径，便于用户打开编辑手写备注区。",
+            new JsonObject()),
+        Tool("zodiac_analyze",
+            "星座趣味分析。传入生日（1999-8-15）或星座名（处女座）。",
+            Props(("query", "string", "生日或星座名")),
+            required: ["query"]),
+        Tool("daily_card",
+            "生成今日陪伴卡：能量/穿搭/习惯/一句话（趣味）。",
+            Props(("name", "string", "可选称呼"))),
         Tool("list_dir",
             "列出目录内容（文件与子文件夹）。",
             Props(
@@ -142,6 +171,17 @@ public static class WindowsAgentToolkit
                 "get_system_info" => GetSystemInfo(),
                 "get_location" => await GetLocationAsync(ct).ConfigureAwait(false),
                 "get_weather" => await GetWeatherAsync(Str(args, "city"), ct).ConfigureAwait(false),
+                "memo_add" => MemoAdd(Str(args, "text"), Str(args, "due")),
+                "memo_list" => CompanionRuntime.Memory.ListMemosText(Bool(args, "include_done", false)),
+                "memo_done" => CompanionRuntime.Memory.CompleteMemo(Str(args, "id"))
+                    ? "已勾掉这条备忘～"
+                    : "没找到对应备忘，可用 memo_list 看列表。",
+                "memory_list" => MemoryListText(),
+                "agent_md_read" => AgentMdRead(Int(args, "max_chars", 8000)),
+                "agent_md_path" => CompanionRuntime.AgentMd.FilePath,
+                "zodiac_analyze" => ZodiacService.Analyze(Str(args, "query"), "宝宝"),
+                "daily_card" => DailyCompanion.BuildDailyCard(
+                    string.IsNullOrWhiteSpace(Str(args, "name")) ? "宝宝" : Str(args, "name")),
                 "list_dir" => ListDir(Str(args, "path"), Int(args, "max_entries", 80)),
                 "read_file" => ReadFile(Str(args, "path"), Int(args, "max_chars", 20000)),
                 "write_file" => WriteFile(Str(args, "path"), Str(args, "content"), Bool(args, "create_dirs", true)),
@@ -166,6 +206,61 @@ public static class WindowsAgentToolkit
         {
             return $"错误：{ex.GetType().Name}: {ex.Message}";
         }
+    }
+
+    private static string MemoryListText()
+    {
+        var block = CompanionRuntime.Memory.FormatForSystemPrompt();
+        var md = CompanionRuntime.AgentMd.FormatForSystemPrompt(4000);
+        var sb = new StringBuilder();
+        sb.AppendLine(string.IsNullOrWhiteSpace(block)
+            ? "（结构化记忆尚空）"
+            : block);
+        sb.AppendLine();
+        sb.AppendLine("--- agent.md ---");
+        sb.AppendLine(string.IsNullOrWhiteSpace(md) ? "（agent.md 尚无摘要）" : md);
+        sb.AppendLine();
+        sb.AppendLine("文件: " + CompanionRuntime.AgentMd.FilePath);
+        return sb.ToString().Trim();
+    }
+
+    private static string AgentMdRead(int maxChars)
+    {
+        maxChars = Math.Clamp(maxChars, 500, 50_000);
+        var raw = CompanionRuntime.AgentMd.ReadRaw();
+        if (string.IsNullOrWhiteSpace(raw))
+            return "（agent.md 为空）路径: " + CompanionRuntime.AgentMd.FilePath;
+        if (raw.Length > maxChars)
+            raw = raw[..maxChars] + "\n…（已截断）";
+        return raw + "\n\n路径: " + CompanionRuntime.AgentMd.FilePath;
+    }
+
+    private static string MemoAdd(string text, string dueRaw)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return "错误：提醒内容不能为空";
+        DateTime? due = null;
+        if (!string.IsNullOrWhiteSpace(dueRaw))
+        {
+            if (DateTime.TryParse(dueRaw, out var dt))
+                due = dt;
+            else if (CompanionMemoryService.TryParseMemo("提醒我" + dueRaw + text, out var body, out var d))
+            {
+                due = d;
+                if (!string.IsNullOrWhiteSpace(body) && body != "你设的提醒")
+                    text = body;
+            }
+        }
+        else if (CompanionMemoryService.TryParseMemo(text, out var body2, out var d2))
+        {
+            text = body2;
+            due = d2;
+        }
+
+        var item = CompanionRuntime.Memory.AddMemo(text, due, "tool");
+        return due is null
+            ? $"已记下待办：{item.Text}"
+            : $"好，{due:MM-dd HH:mm} 我会提醒你：{item.Text}";
     }
 
     // ---------- implementations ----------
