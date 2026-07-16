@@ -12,6 +12,11 @@
         ResizeMode="CanResizeWithGrip"
         WindowStyle="None"
         AllowsTransparency="False"
+        AllowDrop="True"
+        PreviewDragEnter="Window_PreviewDragEnter"
+        PreviewDragOver="Window_PreviewDragOver"
+        PreviewDragLeave="Window_PreviewDragLeave"
+        PreviewDrop="Window_PreviewDrop"
         KeyDown="Window_KeyDown"
         Loaded="Window_Loaded">
   <Window.Resources>
@@ -118,6 +123,18 @@
         <RowDefinition Height="Auto" />
       </Grid.RowDefinitions>
 
+      <!-- 拖入文件时的全窗提示层（盖在内容上，不拦截布局） -->
+      <Border x:Name="DropOverlay" Grid.Row="0" Grid.RowSpan="5"
+              Background="#CC07C160" Visibility="Collapsed" IsHitTestVisible="False"
+              Panel.ZIndex="100">
+        <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+          <TextBlock Text="松开即可添加附件" FontSize="20" FontWeight="SemiBold"
+                     Foreground="White" HorizontalAlignment="Center" />
+          <TextBlock Text="支持图片 / 文本 / 代码 · 最多 6 个 · 单文件 ≤8MB"
+                     FontSize="13" Foreground="#F0FFF6" HorizontalAlignment="Center" Margin="0,8,0,0" />
+        </StackPanel>
+      </Border>
+
       <!-- ========== 顶栏：拖动 + 标题 ========== -->
       <Border Grid.Row="0" Background="#EDEDED" BorderBrush="#D9D9D9" BorderThickness="0,0,0,1"
               MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
@@ -198,7 +215,8 @@
           <!-- 工具行：+ 附件 / 语音 / 看桌面勾选 -->
           <DockPanel Grid.Row="0" Margin="0,0,0,6">
             <Button x:Name="AttachButton" DockPanel.Dock="Left" Content="＋" FontSize="20"
-                    Style="{StaticResource WxIconButton}" ToolTip="上传图片 / 文件"
+                    Style="{StaticResource WxIconButton}"
+                    ToolTip="上传图片 / 文件（也可拖入窗口，或 Ctrl+V 粘贴）"
                     AutomationProperties.Name="添加附件"
                     Click="AttachButton_Click" />
             <Button x:Name="VoiceButton" DockPanel.Dock="Left" Content="🎤" FontSize="16"
@@ -208,7 +226,7 @@
             <CheckBox x:Name="DesktopCheck" Content="附带桌面截图" IsChecked="False"
                       Foreground="#576B95" FontSize="12" VerticalAlignment="Center"
                       Margin="6,0,0,0" />
-            <TextBlock DockPanel.Dock="Right" Text="Enter 发送 · Shift+Enter 换行"
+            <TextBlock DockPanel.Dock="Right" Text="拖文件 / Ctrl+V · Enter 发送"
                        FontSize="11" Foreground="#B2B2B2" VerticalAlignment="Center"
                        HorizontalAlignment="Right" />
           </DockPanel>

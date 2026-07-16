@@ -82,9 +82,9 @@ public static class WindowsAgentToolkit
             "生成今日陪伴卡：能量/穿搭/习惯/一句话（趣味）。",
             Props(("name", "string", "可选称呼"))),
         Tool("list_dir",
-            "列出目录内容（文件与子文件夹）。",
+            "列出目录内容（文件与子文件夹）。path 可用绝对路径，也可用别名：桌面/Desktop、文档、下载、图片等。",
             Props(
-                ("path", "string", "目录绝对路径，如 C:\\Users\\Name\\Documents"),
+                ("path", "string", "目录路径或别名，如 桌面、Desktop、下载、C:\\Users\\Name\\Documents；空则默认桌面"),
                 ("max_entries", "integer", "最多返回条数，默认 80")),
             required: ["path"]),
         Tool("read_file",
@@ -520,14 +520,27 @@ public static class WindowsAgentToolkit
 
     private static string ListDir(string path, int max)
     {
+        // 空路径或纯空白 → 桌面，避免模型乱猜盘符
+        if (string.IsNullOrWhiteSpace(path))
+            path = "桌面";
         path = Expand(path);
         if (!Directory.Exists(path))
-            return $"错误：目录不存在 {path}";
+            return $"错误：目录不存在 {path}。可试 path=桌面 / Desktop / 文档 / 下载，或先 get_special_folder。";
         max = Math.Clamp(max, 1, 300);
         var sb = new StringBuilder();
         sb.AppendLine($"目录: {path}");
-        var dirs = Directory.EnumerateDirectories(path).OrderBy(x => x).Take(max).ToList();
-        var files = Directory.EnumerateFiles(path).OrderBy(x => x).Take(max).ToList();
+        List<string> dirs;
+        List<string> files;
+        try
+        {
+            dirs = Directory.EnumerateDirectories(path).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).Take(max).ToList();
+            files = Directory.EnumerateFiles(path).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).Take(max).ToList();
+        }
+        catch (Exception ex)
+        {
+            return $"错误：无法读取目录 {path}（{ex.GetType().Name}: {ex.Message}）。若是权限问题，可换路径或用管理员身份运行。";
+        }
+
         foreach (var d in dirs.Take(max))
             sb.AppendLine($"[目录] {Path.GetFileName(d)}");
         var left = max - Math.Min(dirs.Count, max);
@@ -537,7 +550,7 @@ public static class WindowsAgentToolkit
             sb.AppendLine($"[文件] {fi.Name}  ({fi.Length} bytes, {fi.LastWriteTime:yyyy-MM-dd HH:mm})");
         }
 
-        sb.AppendLine($"统计: {dirs.Count}+ 子目录(列出部分), 文件已列 {Math.Min(files.Count, Math.Max(0, left))} 条");
+        sb.AppendLine($"统计: 子目录 {dirs.Count} 条(已列部分), 文件已列 {Math.Min(files.Count, Math.Max(0, left))} 条");
         return sb.ToString().Trim();
     }
 
@@ -798,22 +811,8 @@ public static class WindowsAgentToolkit
 
     private static string GetSpecialFolder(string name)
     {
-        var n = (name ?? "").Trim().ToLowerInvariant();
-        var path = n switch
-        {
-            "desktop" or "桌面" => Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
-            "documents" or "docs" or "文档" or "我的文档" => Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-            "downloads" or "download" or "下载" => GetDownloadsPath(),
-            "pictures" or "图片" => Environment.GetFolderPath(Environment.SpecialFolder.MyPictures),
-            "music" or "音乐" => Environment.GetFolderPath(Environment.SpecialFolder.MyMusic),
-            "videos" or "视频" => Environment.GetFolderPath(Environment.SpecialFolder.MyVideos),
-            "userprofile" or "home" or "用户" or "用户目录" => Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            "appdata" or "roaming" => Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "localappdata" or "local" => Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "temp" or "临时" => Path.GetTempPath(),
-            _ => "",
-        };
-        return string.IsNullOrEmpty(path) ? $"错误：未知特殊文件夹 {name}" : path;
+        var path = FolderPathResolver.ResolveAlias(name);
+        return string.IsNullOrEmpty(path) ? $"错误：未知特殊文件夹 {name}" : path!;
     }
 
     private static string CreateDirectory(string path)
@@ -963,30 +962,9 @@ public static class WindowsAgentToolkit
             }
             : "";
 
-    private static string Expand(string path)
-    {
-        path = (path ?? "").Trim().Trim('"');
-        if (path.StartsWith("~/", StringComparison.Ordinal) || path == "~")
-            path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), path.TrimStart('~', '/', '\\'));
-        path = Environment.ExpandEnvironmentVariables(path);
-        // 中文别名快捷
-        path = path.Replace("/桌面", Environment.GetFolderPath(Environment.SpecialFolder.Desktop), StringComparison.OrdinalIgnoreCase);
-        return Path.GetFullPath(path);
-    }
+    private static string Expand(string path) => FolderPathResolver.Expand(path);
 
-    private static string GetDownloadsPath()
-    {
-        try
-        {
-            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            var dl = Path.Combine(home, "Downloads");
-            return Directory.Exists(dl) ? dl : home;
-        }
-        catch
-        {
-            return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        }
-    }
+    private static string GetDownloadsPath() => FolderPathResolver.GetDownloadsPath();
 
     private static bool IsDangerousPath(string path)
     {

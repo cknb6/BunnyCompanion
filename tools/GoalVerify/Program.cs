@@ -162,6 +162,46 @@ void Fail(string msg)
     File.WriteAllText(Path.Combine(scratch, "zodiac-daily.txt"), z + "\n---\n" + card + "\n");
 }
 
+// ---------- 2b2) 路径别名（桌面/Desktop/空串） ----------
+{
+    var deskZh = FolderPathResolver.ResolveAlias("桌面");
+    var deskEn = FolderPathResolver.ResolveAlias("Desktop");
+    var deskExpand = FolderPathResolver.Expand("桌面");
+    var emptyExpand = FolderPathResolver.Expand("");
+    var expected = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+
+    if (string.IsNullOrWhiteSpace(deskZh) || !Directory.Exists(deskZh))
+        Fail("ResolveAlias 桌面 失败: " + deskZh);
+    else
+        Ok("ResolveAlias 桌面 OK → " + deskZh);
+
+    if (string.IsNullOrWhiteSpace(deskEn) || !Directory.Exists(deskEn))
+        Fail("ResolveAlias Desktop 失败: " + deskEn);
+    else
+        Ok("ResolveAlias Desktop OK");
+
+    if (!string.Equals(deskExpand, expected, StringComparison.OrdinalIgnoreCase)
+        && !string.Equals(deskZh, deskExpand, StringComparison.OrdinalIgnoreCase))
+        Fail($"Expand 桌面 不一致 expand={deskExpand} expected={expected}");
+    else
+        Ok("Expand 桌面 OK");
+
+    if (string.IsNullOrWhiteSpace(emptyExpand) || !Directory.Exists(emptyExpand))
+        Fail("Expand 空串 应回落到桌面: " + emptyExpand);
+    else
+        Ok("Expand 空串→桌面 OK");
+
+    // 前缀：桌面下虚构相对路径应落在桌面目录内
+    var child = FolderPathResolver.Expand("桌面" + Path.DirectorySeparatorChar + "goal_verify_probe.txt");
+    if (!child.StartsWith(expected.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase))
+        Fail("Expand 桌面/子路径 未落在桌面下: " + child);
+    else
+        Ok("Expand 桌面/子路径 OK");
+
+    File.WriteAllText(Path.Combine(scratch, "folder-alias.txt"),
+        $"zh={deskZh}\nen={deskEn}\nexpand={deskExpand}\nempty={emptyExpand}\nchild={child}\n");
+}
+
 // ---------- 2c) 系统触发器配置归一化 / 返回检测 ----------
 {
     var cfg = new SystemTriggerConfig

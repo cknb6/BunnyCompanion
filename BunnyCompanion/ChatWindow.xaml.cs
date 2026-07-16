@@ -15,6 +15,9 @@ using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
 using Brushes = System.Windows.Media.Brushes;
 using Cursors = System.Windows.Input.Cursors;
 using TextBox = System.Windows.Controls.TextBox;
+using DataFormats = System.Windows.DataFormats;
+using DragDropEffects = System.Windows.DragDropEffects;
+using DragEventArgs = System.Windows.DragEventArgs;
 
 namespace BunnyCompanion;
 
@@ -74,7 +77,7 @@ public partial class ChatWindow : Window
         AppendTimeIfNeeded(force: true);
         AppendBubble(
             _settings.PetName,
-            $"嗨，{_settings.PartnerName}～\n像微信一样随便聊就行。可以发图片、代码文件，也可以点「看桌面」让我瞅一眼屏幕。\n断网也没关系，我会继续陪你。",
+            $"嗨，{_settings.PartnerName}～\n像微信一样随便聊就行。可以把图片/代码文件拖进窗口，点「＋」选择，或 Ctrl+V 粘贴；也可以点「看桌面」让我瞅一眼屏幕。\n断网也没关系，我会继续陪你。",
             isPet: true);
         InputBox.Focus();
     }
@@ -189,6 +192,89 @@ public partial class ChatWindow : Window
         AttachBar.Visibility = Visibility.Collapsed;
     }
 
+    // ---------- 拖拽文件到聊天窗口 ----------
+
+    private static bool HasFileDrop(DragEventArgs e) =>
+        e.Data.GetDataPresent(DataFormats.FileDrop);
+
+    private void SetDropOverlay(bool visible)
+    {
+        if (!IsLoaded)
+            return;
+        DropOverlay.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void Window_PreviewDragEnter(object sender, DragEventArgs e)
+    {
+        if (!HasFileDrop(e) || _busy || _loadingAttachments)
+        {
+            e.Effects = DragDropEffects.None;
+            e.Handled = true;
+            return;
+        }
+
+        e.Effects = DragDropEffects.Copy;
+        e.Handled = true;
+        SetDropOverlay(true);
+    }
+
+    private void Window_PreviewDragOver(object sender, DragEventArgs e)
+    {
+        if (!HasFileDrop(e) || _busy || _loadingAttachments)
+        {
+            e.Effects = DragDropEffects.None;
+            e.Handled = true;
+            SetDropOverlay(false);
+            return;
+        }
+
+        e.Effects = DragDropEffects.Copy;
+        e.Handled = true;
+        SetDropOverlay(true);
+    }
+
+    private void Window_PreviewDragLeave(object sender, DragEventArgs e)
+    {
+        // 离开窗口时关掉遮罩；在子控件间移动时也可能触发，用坐标判断是否仍在窗内
+        try
+        {
+            var pos = e.GetPosition(this);
+            if (pos.X < 0 || pos.Y < 0 || pos.X > ActualWidth || pos.Y > ActualHeight)
+                SetDropOverlay(false);
+        }
+        catch
+        {
+            SetDropOverlay(false);
+        }
+
+        e.Handled = true;
+    }
+
+    private async void Window_PreviewDrop(object sender, DragEventArgs e)
+    {
+        SetDropOverlay(false);
+        if (!HasFileDrop(e) || _busy || _loadingAttachments)
+        {
+            e.Handled = true;
+            return;
+        }
+
+        string[]? paths = null;
+        try
+        {
+            paths = e.Data.GetData(DataFormats.FileDrop) as string[];
+        }
+        catch
+        {
+            // ignore
+        }
+
+        e.Effects = DragDropEffects.Copy;
+        e.Handled = true;
+        if (paths is { Length: > 0 })
+            await AddAttachmentPathsAsync(paths).ConfigureAwait(true);
+    }
+
     private async void AttachButton_Click(object sender, RoutedEventArgs e)
     {
         if (_busy || _loadingAttachments)
@@ -208,6 +294,25 @@ public partial class ChatWindow : Window
         if (dialog.ShowDialog(this) != true)
             return;
 
+        await AddAttachmentPathsAsync(dialog.FileNames).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// 统一入口：对话框选择 / 拖拽 / 剪贴板文件列表 都走这里。
+    /// </summary>
+    private async Task AddAttachmentPathsAsync(IEnumerable<string> paths)
+    {
+        if (_busy || _loadingAttachments)
+            return;
+
+        var list = paths
+            .Where(p => !string.IsNullOrWhiteSpace(p))
+            .Select(p => p.Trim().Trim('"'))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (list.Count == 0)
+            return;
+
         var previousStatus = StatusText.Text;
         _loadingAttachments = true;
         AttachButton.IsEnabled = false;
@@ -215,13 +320,24 @@ public partial class ChatWindow : Window
         StatusText.Text = "正在读取附件…";
         try
         {
-            foreach (var path in dialog.FileNames)
+            foreach (var path in list)
             {
                 if (_pending.Count >= 6)
                 {
                     AppendSystemTip("一次最多 6 个附件，其余文件已跳过。");
                     break;
                 }
+
+                // 文件夹：提示，不整树塞进附件
+                if (Directory.Exists(path))
+                {
+                    AppendSystemTip($"「{Path.GetFileName(path)}」是文件夹，请拖入具体文件；或让我用工具列目录。");
+                    continue;
+                }
+
+                // 已添加同路径则跳过
+                if (_pending.Any(p => string.Equals(p.Path, path, StringComparison.OrdinalIgnoreCase)))
+                    continue;
 
                 var result = await Task.Run(() => LoadAttachment(path)).ConfigureAwait(true);
                 if (!IsLoaded)
@@ -239,10 +355,95 @@ public partial class ChatWindow : Window
             {
                 RefreshAttachBar();
                 AttachButton.IsEnabled = !_busy;
-                SendButton.IsEnabled = !_busy;
+                SendButton.IsEnabled = !_busy || _cancelRequested;
                 if (StatusText.Text == "正在读取附件…")
-                    StatusText.Text = previousStatus;
+                    StatusText.Text = string.IsNullOrWhiteSpace(previousStatus) ? "在线" : previousStatus;
             }
+        }
+    }
+
+    /// <summary>从剪贴板添加文件列表或截图。</summary>
+    private async Task<bool> TryAddFromClipboardAsync()
+    {
+        if (_busy || _loadingAttachments)
+            return false;
+
+        try
+        {
+            // 1) 资源管理器复制的文件
+            if (System.Windows.Clipboard.ContainsFileDropList())
+            {
+                var drop = System.Windows.Clipboard.GetFileDropList();
+                if (drop is { Count: > 0 })
+                {
+                    var paths = drop.Cast<string?>().Where(s => !string.IsNullOrWhiteSpace(s)).Cast<string>();
+                    await AddAttachmentPathsAsync(paths).ConfigureAwait(true);
+                    return true;
+                }
+            }
+
+            // 2) 截图 / 画图复制的位图
+            if (System.Windows.Clipboard.ContainsImage())
+            {
+                var src = System.Windows.Clipboard.GetImage();
+                if (src is null)
+                    return false;
+
+                var bytes = EncodeBitmapSourceToPng(src);
+                if (bytes is null || bytes.Length == 0)
+                {
+                    AppendSystemTip("剪贴板图片读取失败，请另存为文件后再拖入。");
+                    return true;
+                }
+
+                if (_pending.Count >= 6)
+                {
+                    AppendSystemTip("一次最多 6 个附件，请先清除部分再粘贴。");
+                    return true;
+                }
+
+                var normalized = TryDownscaleImage(bytes) ?? bytes;
+                var name = $"粘贴图片_{DateTime.Now:HHmmss}.png";
+                _pending.Add(new PendingAttachment
+                {
+                    Path = name,
+                    FileName = name,
+                    Kind = ChatAttachmentKind.Image,
+                    MimeType = "image/png",
+                    ImageBytes = normalized,
+                    SizeBytes = normalized.LongLength,
+                });
+                RefreshAttachBar();
+                AppendSystemTip($"已从剪贴板添加图片「{name}」。");
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendSystemTip("粘贴附件失败：" + ex.Message);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static byte[]? EncodeBitmapSourceToPng(BitmapSource source)
+    {
+        try
+        {
+            // 统一 Freeze，避免跨线程/跨调度器问题
+            if (source.CanFreeze && !source.IsFrozen)
+                source.Freeze();
+
+            var encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(source));
+            using var ms = new MemoryStream();
+            encoder.Save(ms);
+            return ms.ToArray();
+        }
+        catch
+        {
+            return null;
         }
     }
 
@@ -336,6 +537,14 @@ public partial class ChatWindow : Window
 
     private void InputBox_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        // Ctrl+V：优先尝试粘贴文件/截图为附件（有文件时不往输入框塞路径乱码）
+        if (e.Key == Key.V && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control
+            && (Keyboard.Modifiers & ModifierKeys.Alt) == 0)
+        {
+            _ = HandlePasteAsync(e);
+            return;
+        }
+
         // Enter 发送；Shift+Enter 换行（更接近微信习惯）
         if (e.Key == Key.Enter && Keyboard.Modifiers == ModifierKeys.None)
         {
@@ -344,8 +553,38 @@ public partial class ChatWindow : Window
         }
     }
 
+    private async Task HandlePasteAsync(KeyEventArgs e)
+    {
+        // 先探测是否有文件/图，再决定是否拦截默认粘贴
+        var hasFileOrImage = false;
+        try
+        {
+            hasFileOrImage = System.Windows.Clipboard.ContainsFileDropList()
+                             || System.Windows.Clipboard.ContainsImage();
+        }
+        catch
+        {
+            // 剪贴板被占用时放行默认粘贴
+        }
+
+        if (!hasFileOrImage)
+            return;
+
+        e.Handled = true;
+        await TryAddFromClipboardAsync().ConfigureAwait(true);
+    }
+
     private void Window_KeyDown(object sender, KeyEventArgs e)
     {
+        // 窗口级 Ctrl+V：输入框未聚焦时也能贴附件
+        if (e.Key == Key.V && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control
+            && (Keyboard.Modifiers & ModifierKeys.Alt) == 0
+            && !InputBox.IsKeyboardFocusWithin)
+        {
+            _ = HandlePasteAsync(e);
+            return;
+        }
+
         if (e.Key == Key.Escape)
         {
             if (_busy)

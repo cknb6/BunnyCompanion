@@ -14,6 +14,7 @@
     <Compile Include="..\..\BunnyCompanion\Services\LocalAgentMdStore.cs" Link="LocalAgentMdStore.cs" />
     <Compile Include="..\..\BunnyCompanion\Services\WeatherReport.cs" Link="WeatherReport.cs" />
     <Compile Include="..\..\BunnyCompanion\Services\ZodiacService.cs" Link="ZodiacService.cs" />
+    <Compile Include="..\..\BunnyCompanion\Services\FolderPathResolver.cs" Link="FolderPathResolver.cs" />
     <Compile Include="..\..\BunnyCompanion\Services\DailyCompanion.cs" Link="DailyCompanion.cs" />
     <Compile Include="..\..\BunnyCompanion\Engine\MouseReactionCatalog.cs" Link="MouseReactionCatalog.cs" />
     <Compile Include="..\..\BunnyCompanion\Models\PetSettings.cs" Link="PetSettings.cs" />
