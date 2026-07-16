@@ -11,6 +11,14 @@ from pathlib import Path
 from PIL import Image
 
 
+# Windows CI 的非交互控制台可能默认 cp1252，中文校验结果会在 print 时失败。
+for stream in (sys.stdout, sys.stderr):
+    try:
+        stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
+
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT / "BunnyCompanion"
 ERRORS: list[str] = []
