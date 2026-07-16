@@ -47,6 +47,10 @@ public static class DesktopCaptureService
     {
         try
         {
+            // 截图本身在后台线程执行，但 WPF Window 属性只能由其 Dispatcher 线程读取。
+            if (window is not null && !window.Dispatcher.CheckAccess())
+                return window.Dispatcher.Invoke(() => ResolveScreenBounds(window));
+
             if (window is { IsLoaded: true })
             {
                 var width = window.ActualWidth > 0 ? window.ActualWidth : Math.Max(window.Width, 1);

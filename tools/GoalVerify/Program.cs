@@ -151,6 +151,33 @@ void Fail(string msg)
     File.WriteAllText(Path.Combine(scratch, "zodiac-daily.txt"), z + "\n---\n" + card + "\n");
 }
 
+// ---------- 2c) 系统触发器配置归一化 / 返回检测 ----------
+{
+    var cfg = new SystemTriggerConfig
+    {
+        HighCpuThreshold = double.NaN,
+        HighMemoryThreshold = 180,
+        LowBatteryThreshold = -5,
+        IdleTooLongSeconds = -1,
+        CooldownSeconds = 0,
+    };
+    cfg.Normalize();
+    if (cfg.HighCpuThreshold != 85 || cfg.HighMemoryThreshold != 100
+        || cfg.LowBatteryThreshold != 0 || cfg.IdleTooLongSeconds != 0
+        || cfg.CooldownSeconds != 60)
+        Fail("SystemTriggerConfig.Normalize 越界修复失败");
+    else
+        Ok("SystemTriggerConfig.Normalize OK");
+
+    if (!SystemTriggerConfig.HasReturnedFromIdle(true, 3, 600)
+        || !SystemTriggerConfig.HasReturnedFromIdle(true, 120, 600)
+        || SystemTriggerConfig.HasReturnedFromIdle(false, 3, 600)
+        || SystemTriggerConfig.HasReturnedFromIdle(true, 600, 600))
+        Fail("久离返回检测失败");
+    else
+        Ok("久离提醒仅在返回后触发");
+}
+
 // ---------- 3) 鼠标反应池 ----------
 {
     var zones = Enum.GetValues<BodyZone>();

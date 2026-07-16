@@ -39,10 +39,12 @@ public sealed class AiAgentService
     private static readonly HttpClient Http = CreateClient();
     private readonly List<ChatTurn> _history = [];
     private readonly object _gate = new();
+    private readonly SemaphoreSlim _chatRequestGate = new(1, 1);
     private readonly CompanionMemoryService _memory;
     private readonly LocalAgentMdStore _agentMd;
 
     private sealed record ChatTurn(string Role, string Text);
+    private sealed record ImageInput(byte[] Bytes, string MimeType);
 
     public AiAgentService(CompanionMemoryService? memory = null, LocalAgentMdStore? agentMd = null)
     {
@@ -73,6 +75,29 @@ public sealed class AiAgentService
         IProgress<string>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        // 同一 Agent 只允许一个回合推进。关闭旧聊天后立刻重开时，新请求会等旧请求完成取消清理。
+        await _chatRequestGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await ChatCoreAsync(
+                    userText, settings, includeDesktop, hostWindow, attachments, progress, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            _chatRequestGate.Release();
+        }
+    }
+
+    private async Task<AgentResult> ChatCoreAsync(
+        string userText,
+        PetSettings settings,
+        bool includeDesktop,
+        Window? hostWindow,
+        IReadOnlyList<ChatAttachment>? attachments,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
         var text = (userText ?? string.Empty).Trim();
         var attachList = attachments?.ToList() ?? [];
         var hasImageAttach = attachList.Any(a => a.Kind == ChatAttachmentKind.Image && a.ImageBytes is { Length: > 0 });
@@ -95,138 +120,181 @@ public sealed class AiAgentService
 
         var composedUser = ComposeUserMessage(text, attachList);
         var wantDesktop = includeDesktop || LooksLikeDesktopRequest(text);
-        byte[]? imageBytes = null;
+        var images = new List<ImageInput>();
+        var desktopCaptured = false;
         if (wantDesktop)
         {
             progress?.Report("正在截取桌面…");
             var capture = await Task.Run(() => DesktopCaptureService.CaptureNearWindow(hostWindow), cancellationToken)
                 .ConfigureAwait(false);
-            imageBytes = capture?.JpegBytes;
+            if (capture?.JpegBytes is { Length: > 0 } desktopBytes)
+            {
+                images.Add(new ImageInput(desktopBytes, "image/jpeg"));
+                desktopCaptured = true;
+            }
         }
 
-        if (hasImageAttach)
-            imageBytes = attachList.First(a => a.Kind == ChatAttachmentKind.Image && a.ImageBytes is { Length: > 0 }).ImageBytes;
+        foreach (var attachment in attachList.Where(a =>
+                     a.Kind == ChatAttachmentKind.Image && a.ImageBytes is { Length: > 0 }))
+        {
+            images.Add(new ImageInput(
+                attachment.ImageBytes!,
+                NormalizeImageMime(attachment.MimeType, attachment.ImageBytes!)));
+        }
 
+        var pendingUserTurn = new ChatTurn("user", composedUser);
         lock (_gate)
         {
-            _history.Add(new ChatTurn("user", composedUser));
+            _history.Add(pendingUserTurn);
             TrimHistoryUnlocked();
         }
 
-        List<ChatTurn> historySnapshot;
-        lock (_gate)
-            historySnapshot = _history.ToList();
-
-        // 先沉淀本轮用户话 → 人物/偏好记忆，再拼系统提示
         try
         {
-            _memory.IngestUserUtterance(text);
-        }
-        catch
-        {
-            // 记忆失败不阻断对话
-        }
+            List<ChatTurn> historySnapshot;
+            lock (_gate)
+                historySnapshot = _history.ToList();
 
-        var systemPrompt = AgentSystemPrompt.Build(settings);
-        var memoryBlock = _memory.FormatForSystemPrompt();
-        if (!string.IsNullOrWhiteSpace(memoryBlock))
-            systemPrompt += "\n\n" + memoryBlock;
-        // 本地 agent.md：滚动摘要 + 近期压缩对话（长期记忆主载体之一）
-        try
-        {
-            var agentMdBlock = _agentMd.FormatForSystemPrompt(maxChars: 5500);
-            if (!string.IsNullOrWhiteSpace(agentMdBlock) && agentMdBlock.Length > 80)
-                systemPrompt += "\n\n" + agentMdBlock;
-        }
-        catch { /* ignore */ }
+            // 先沉淀本轮用户话 → 人物/偏好记忆，再拼系统提示
+            try
+            {
+                _memory.IngestUserUtterance(text);
+            }
+            catch
+            {
+                // 记忆失败不阻断对话
+            }
 
-        var toolTrace = new List<string>();
+            var systemPrompt = AgentSystemPrompt.Build(settings);
+            var memoryBlock = _memory.FormatForSystemPrompt();
+            if (!string.IsNullOrWhiteSpace(memoryBlock))
+                systemPrompt += "\n\n" + memoryBlock;
+            // 本地 agent.md：滚动摘要 + 近期压缩对话（长期记忆主载体之一）
+            try
+            {
+                var agentMdBlock = _agentMd.FormatForSystemPrompt(maxChars: 5500);
+                if (!string.IsNullOrWhiteSpace(agentMdBlock) && agentMdBlock.Length > 80)
+                    systemPrompt += "\n\n" + agentMdBlock;
+            }
+            catch { /* ignore */ }
 
-        // 本地意图预取：定位/天气在模型不会 tool-call 时仍能答对
-        var prefetch = await MaybePrefetchLocalFactsAsync(text, progress, cancellationToken).ConfigureAwait(false);
-        if (!string.IsNullOrWhiteSpace(prefetch))
-        {
-            systemPrompt += "\n\n# 本回合已预取的真实数据（请直接采用，勿编造）\n" + prefetch;
-            toolTrace.Add("prefetch");
-        }
+            var toolTrace = new List<string>();
 
-        // 1) 阶跃 + tools
-        progress?.Report("小申 Agent 思考中…");
-        var step = await TryAgentLoopAsync(
-            providerLabel: "阶跃·3.7",
-            baseUrl: AiConfig.StepBaseUrl,
-            apiKey: AiConfig.StepApiKey,
-            model: AiConfig.StepModel,
-            openRouter: false,
-            systemPrompt: systemPrompt,
-            history: historySnapshot,
-            imageBytes: imageBytes,
-            maxTokens: 2800,
-            enableTools: true,
-            progress: progress,
-            toolTrace: toolTrace,
-            extra: node => node["reasoning_effort"] = AiConfig.StepEffort,
-            cancellationToken: cancellationToken).ConfigureAwait(false);
-        if (step is { } s)
-            return Finalize((s.Text, InferAction(s.Text)), settings, imageBytes is not null, s.Provider, toolTrace, userText: text);
+            // 本地意图预取：定位/天气在模型不会 tool-call 时仍能答对
+            var prefetch = await MaybePrefetchLocalFactsAsync(text, progress, cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(prefetch))
+            {
+                systemPrompt += "\n\n# 本回合已预取的真实数据（请直接采用，勿编造）\n" + prefetch;
+                toolTrace.Add("prefetch");
+            }
 
-        // 2) OpenRouter 免费 + tools（部分模型可能忽略 tools）
-        foreach (var model in imageBytes is not null
-                     ? AiConfig.OpenRouterFreeVisionModels
-                     : AiConfig.OpenRouterFreeTextModels)
-        {
-            progress?.Report("正在换条线路想想…");
-            var hit = await TryAgentLoopAsync(
-                providerLabel: $"OpenRouter·{ShortModel(model)}",
-                baseUrl: AiConfig.OpenRouterBaseUrl,
-                apiKey: AiConfig.OpenRouterApiKey,
-                model: model,
-                openRouter: true,
+            // 1) 阶跃 + tools
+            progress?.Report("在线思考中…");
+            var step = await TryAgentLoopAsync(
+                providerLabel: "阶跃·3.7",
+                baseUrl: AiConfig.StepBaseUrl,
+                apiKey: AiConfig.StepApiKey,
+                model: AiConfig.StepModel,
+                openRouter: false,
                 systemPrompt: systemPrompt,
                 history: historySnapshot,
-                imageBytes: imageBytes,
-                maxTokens: 2200,
+                images: images,
+                maxTokens: 2800,
                 enableTools: true,
                 progress: progress,
                 toolTrace: toolTrace,
-                extra: null,
+                extra: node => node["reasoning_effort"] = AiConfig.StepEffort,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
-            if (hit is { } h)
-                return Finalize((h.Text, InferAction(h.Text)), settings, imageBytes is not null, h.Provider, toolTrace, userText: text);
+            if (step is { } s)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return Finalize((s.Text, InferAction(s.Text)), settings,
+                    usedVisual: images.Count > 0, usedDesktop: desktopCaptured,
+                    s.Provider, toolTrace, pendingUserTurn, userText: text);
+            }
+
+            // 2) OpenRouter 免费 + tools（部分模型可能忽略 tools）
+            foreach (var model in images.Count > 0
+                         ? AiConfig.OpenRouterFreeVisionModels
+                         : AiConfig.OpenRouterFreeTextModels)
+            {
+                progress?.Report("正在换条线路想想…");
+                var hit = await TryAgentLoopAsync(
+                    providerLabel: $"OpenRouter·{ShortModel(model)}",
+                    baseUrl: AiConfig.OpenRouterBaseUrl,
+                    apiKey: AiConfig.OpenRouterApiKey,
+                    model: model,
+                    openRouter: true,
+                    systemPrompt: systemPrompt,
+                    history: historySnapshot,
+                    images: images,
+                    maxTokens: 2200,
+                    enableTools: true,
+                    progress: progress,
+                    toolTrace: toolTrace,
+                    extra: null,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                if (hit is { } h)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return Finalize((h.Text, InferAction(h.Text)), settings,
+                        usedVisual: images.Count > 0, usedDesktop: desktopCaptured,
+                        h.Provider, toolTrace, pendingUserTurn, userText: text);
+                }
+            }
+
+            // 3) 纯文本再试阶跃（无 tools）
+            var stepPlain = await TryAgentLoopAsync(
+                providerLabel: "阶跃·3.7",
+                baseUrl: AiConfig.StepBaseUrl,
+                apiKey: AiConfig.StepApiKey,
+                model: AiConfig.StepModel,
+                openRouter: false,
+                systemPrompt: systemPrompt + "\n" + AgentSystemPrompt.BuildTextOnlyAddon(),
+                history: historySnapshot,
+                images: Array.Empty<ImageInput>(),
+                maxTokens: 2200,
+                enableTools: false,
+                progress: progress,
+                toolTrace: toolTrace,
+                extra: node => node["reasoning_effort"] = AiConfig.StepEffort,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (stepPlain is { } sp)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return Finalize((sp.Text, InferAction(sp.Text)), settings,
+                    usedVisual: false, usedDesktop: false,
+                    sp.Provider, toolTrace, pendingUserTurn, userText: text);
+            }
+
+            // 4) 本地关键词 + 预取数据拼装
+            var offline = ChatReplyService.Reply(text, settings, offlineMode: true, desktopRequested: wantDesktop);
+            var offlineText = offline.Text;
+            if (!string.IsNullOrWhiteSpace(prefetch))
+                offlineText = $"{offlineText}\n\n——\n{FormatPrefetchForUser(prefetch)}";
+            else if (hasTextAttach || hasImageAttach)
+                offlineText = $"{offlineText}\n（在线模型暂时忙，附件我记下了。）";
+            else if (wantDesktop)
+                offlineText = $"{offlineText}\n（在线模型暂时不可用，先本地陪你。）";
+            else
+                offlineText = $"{offlineText}\n（网络不太顺，我先用本地模式陪你。）";
+
+            cancellationToken.ThrowIfCancellationRequested();
+            return Finalize((offlineText, offline.ActionKey), settings,
+                usedVisual: false, usedDesktop: false,
+                "本地", toolTrace, pendingUserTurn, userText: text);
         }
-
-        // 3) 纯文本再试阶跃（无 tools）
-        var stepPlain = await TryAgentLoopAsync(
-            providerLabel: "阶跃·3.7",
-            baseUrl: AiConfig.StepBaseUrl,
-            apiKey: AiConfig.StepApiKey,
-            model: AiConfig.StepModel,
-            openRouter: false,
-            systemPrompt: systemPrompt + "\n" + AgentSystemPrompt.BuildTextOnlyAddon(),
-            history: historySnapshot,
-            imageBytes: imageBytes,
-            maxTokens: 2200,
-            enableTools: false,
-            progress: progress,
-            toolTrace: toolTrace,
-            extra: node => node["reasoning_effort"] = AiConfig.StepEffort,
-            cancellationToken: cancellationToken).ConfigureAwait(false);
-        if (stepPlain is { } sp)
-            return Finalize((sp.Text, InferAction(sp.Text)), settings, imageBytes is not null, sp.Provider, toolTrace, userText: text);
-
-        // 4) 本地关键词 + 预取数据拼装
-        var offline = ChatReplyService.Reply(text, settings, offlineMode: true, desktopRequested: wantDesktop && imageBytes is null);
-        var offlineText = offline.Text;
-        if (!string.IsNullOrWhiteSpace(prefetch))
-            offlineText = $"{offlineText}\n\n——\n{FormatPrefetchForUser(prefetch)}";
-        else if (hasTextAttach || hasImageAttach)
-            offlineText = $"{offlineText}\n（在线模型暂时忙，附件我记下了。）";
-        else if (wantDesktop)
-            offlineText = $"{offlineText}\n（在线模型暂时不可用，先本地陪你。）";
-        else
-            offlineText = $"{offlineText}\n（网络不太顺，我先用本地模式陪你。）";
-
-        return Finalize((offlineText, offline.ActionKey), settings, false, "本地", toolTrace, userText: text);
+        catch
+        {
+            // 按对象身份移除本回合，绝不误删随后新窗口加入的同文本消息。
+            lock (_gate)
+            {
+                var index = _history.FindLastIndex(turn => ReferenceEquals(turn, pendingUserTurn));
+                if (index >= 0)
+                    _history.RemoveAt(index);
+            }
+            throw;
+        }
     }
 
     private sealed record LoopHit(string Text, string Provider);
@@ -239,7 +307,7 @@ public sealed class AiAgentService
         bool openRouter,
         string systemPrompt,
         IReadOnlyList<ChatTurn> history,
-        byte[]? imageBytes,
+        IReadOnlyList<ImageInput> images,
         int maxTokens,
         bool enableTools,
         IProgress<string>? progress,
@@ -250,7 +318,7 @@ public sealed class AiAgentService
         try
         {
             // 可变消息列表（含 tool 回合）
-            var messages = BuildInitialMessages(systemPrompt, history, imageBytes);
+            var messages = BuildInitialMessages(systemPrompt, history, images);
             var tools = enableTools ? WindowsAgentToolkit.BuildToolDefinitions() : null;
 
             for (var round = 0; round < AiConfig.MaxToolRounds; round++)
@@ -416,7 +484,10 @@ public sealed class AiAgentService
         }
     }
 
-    private static JsonArray BuildInitialMessages(string systemPrompt, IReadOnlyList<ChatTurn> history, byte[]? imageBytes)
+    private static JsonArray BuildInitialMessages(
+        string systemPrompt,
+        IReadOnlyList<ChatTurn> history,
+        IReadOnlyList<ImageInput> images)
     {
         var messages = new JsonArray
         {
@@ -437,23 +508,25 @@ public sealed class AiAgentService
         }
 
         var last = history.Count > 0 ? history[^1] : new ChatTurn("user", "在吗");
-        if (imageBytes is { Length: > 0 } && last.Role == "user")
+        if (images.Count > 0 && last.Role == "user")
         {
-            var dataUrl = LooksLikePng(imageBytes) && !LooksLikeJpeg(imageBytes)
-                ? $"data:image/png;base64,{Convert.ToBase64String(imageBytes)}"
-                : $"data:image/jpeg;base64,{Convert.ToBase64String(imageBytes)}";
+            var content = new JsonArray
+            {
+                new JsonObject { ["type"] = "text", ["text"] = last.Text },
+            };
+            foreach (var image in images)
+            {
+                var dataUrl = $"data:{image.MimeType};base64,{Convert.ToBase64String(image.Bytes)}";
+                content.Add(new JsonObject
+                {
+                    ["type"] = "image_url",
+                    ["image_url"] = new JsonObject { ["url"] = dataUrl },
+                });
+            }
             messages.Add(new JsonObject
             {
                 ["role"] = "user",
-                ["content"] = new JsonArray
-                {
-                    new JsonObject { ["type"] = "text", ["text"] = last.Text },
-                    new JsonObject
-                    {
-                        ["type"] = "image_url",
-                        ["image_url"] = new JsonObject { ["url"] = dataUrl },
-                    },
-                },
+                ["content"] = content,
             });
         }
         else
@@ -561,26 +634,36 @@ public sealed class AiAgentService
     private AgentResult Finalize(
         (string Text, string ActionKey) reply,
         PetSettings settings,
-        bool usedImage,
+        bool usedVisual,
+        bool usedDesktop,
         string provider,
         List<string>? toolTrace,
+        ChatTurn pendingUserTurn,
         string? userText = null)
     {
         var text = CleanReply(reply.Text);
         if (text.Length == 0)
             text = $"我在呢，{settings.PartnerName}。再说一次好不好？";
 
+        var historyStillContainsTurn = false;
         lock (_gate)
         {
-            _history.Add(new ChatTurn("assistant", text));
-            TrimHistoryUnlocked();
+            historyStillContainsTurn = _history.Any(turn => ReferenceEquals(turn, pendingUserTurn));
+            if (historyStillContainsTurn)
+            {
+                _history.Add(new ChatTurn("assistant", text));
+                TrimHistoryUnlocked();
+            }
         }
 
         // 每轮结束后写入本地 agent.md（摘要压缩 / 超长自动折叠）
         try
         {
-            _agentMd.AppendTurnDigest(userText ?? "", text, settings.PartnerName);
-            CompanionRuntime.SyncAgentMdFromMemory();
+            if (historyStillContainsTurn)
+            {
+                _agentMd.AppendTurnDigest(userText ?? "", text, settings.PartnerName);
+                CompanionRuntime.SyncAgentMdFromMemory();
+            }
         }
         catch
         {
@@ -588,8 +671,8 @@ public sealed class AiAgentService
         }
 
         var action = string.IsNullOrWhiteSpace(reply.ActionKey) ? InferAction(text) : reply.ActionKey;
-        var affection = 2 + (usedImage ? 1 : 0) + (toolTrace is { Count: > 0 } ? 1 : 0);
-        return new AgentResult(text, action, affection, provider, usedImage, toolTrace);
+        var affection = 2 + (usedVisual ? 1 : 0) + (toolTrace is { Count: > 0 } ? 1 : 0);
+        return new AgentResult(text, action, affection, provider, usedDesktop, toolTrace);
     }
 
     private static async Task<string> PostChatAsync(
@@ -680,6 +763,18 @@ public sealed class AiAgentService
 
     private static bool LooksLikePng(byte[] bytes) =>
         bytes.Length > 4 && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47;
+
+    private static string NormalizeImageMime(string? mimeType, byte[] bytes)
+    {
+        var mime = (mimeType ?? string.Empty).Trim().ToLowerInvariant();
+        if (mime is "image/jpeg" or "image/png" or "image/gif" or "image/webp" or "image/bmp")
+            return mime;
+        if (LooksLikeJpeg(bytes))
+            return "image/jpeg";
+        if (LooksLikePng(bytes))
+            return "image/png";
+        return "image/jpeg";
+    }
 
     private static HttpClient CreateClient()
     {

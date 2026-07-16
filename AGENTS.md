@@ -130,9 +130,18 @@ BunnyCompanion/
 - **技能插件系统**（`SkillPluginService`）：`%LocalAppData%\BunnyCompanion\skills\` 下 Markdown 技能（frontmatter: name/description/triggers/command + 正文指令）。`skill_list/get/run` 工具。内置清理临时文件、今日待办、打开常用示例。`CompanionRuntime.Skills` 单例。
 - **语音输入+TTS**（`VoiceService`）：TTS 优先阶跃在线（`step-tts-mini`，复用 `StepApiKey`，真人级）→ SAPI 离线兜底；ASR 用 SAPI（PowerShell 调 `System.Speech.Recognition`）。`PetSettings.TtsEnabled`/`VoiceInputEnabled` 开关。界面只显示「语音输入/朗读」。
 
+## 体验与可靠性升级（v1.3）
+
+- Agent 支持多张上传图片与桌面截图同时进入视觉请求；`UsedDesktopImage` 只表示桌面截图确实成功加入请求。
+- 聊天生成期间发送按钮切换为“停止”，也可按 Esc 取消；取消后回滚未回答的历史消息。
+- 语音、CPU/内存/电量/久离返回阈值、冷却时间均有设置入口；久离提醒在用户返回后显示。
+- 聊天与设置窗口按当前显示器工作区缩放，快捷键冲突可在帮助中看到，跨显示器全屏不再误隐藏桌宠。
+- PowerShell 工具统一使用 `-EncodedCommand`，外部命令支持真实超时与取消。
+- CI 在发布前执行三套自检，并分别验证 win-x64/win-arm64 校验文件与最终 EXE 的 SHA256。
+
 ## 版本号（单一来源）
 
-- 唯一来源：`BunnyCompanion.csproj` 的 `<Version>`（如 1.2.0）。
+- 唯一来源：`BunnyCompanion.csproj` 的 `<Version>`。
 - `AppCredits.VersionLabel` 运行时读程序集版本，不再硬编码。
 - CI Release tag = `v<Version>.<run_number>`，从 csproj 提取，不写死。
 - `Build-Windows.ps1` 校验文件头也从 csproj 读版本。

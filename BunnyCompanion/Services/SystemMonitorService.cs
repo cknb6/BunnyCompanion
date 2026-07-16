@@ -53,15 +53,18 @@ public static class SystemMonitorService
         try
         {
             var p = Forms.SystemInformation.PowerStatus;
-            // BatteryLifePercent == 255 表示无电池（台式机，Windows API 约定）
-            var noBattery = p.BatteryLifePercent == 255 || p.BatteryLifePercent < 0;
+            var chargeStatus = p.BatteryChargeStatus;
+            var noBattery = chargeStatus.HasFlag(Forms.BatteryChargeStatus.NoSystemBattery)
+                            || !float.IsFinite(p.BatteryLifePercent)
+                            || p.BatteryLifePercent < 0;
             if (noBattery)
                 return new BatteryStatus(false, -1, true, false, -1);
 
-            var pct = p.BatteryLifePercent == 255 ? 100 : (int)Math.Round(p.BatteryLifePercent);
+            // WinForms 返回 0.0～1.0 的比例，不是 0～100；旧逻辑会把 67% 错报成 1%。
+            var pct = (int)Math.Round(Math.Clamp(p.BatteryLifePercent, 0f, 1f) * 100);
             var onAc = p.PowerLineStatus == Forms.PowerLineStatus.Online;
-            var charging = onAc && pct < 100;
-            var minutes = p.BatteryFullLifetime > 0 ? p.BatteryFullLifetime / 60 : -1;
+            var charging = chargeStatus.HasFlag(Forms.BatteryChargeStatus.Charging);
+            var minutes = p.BatteryLifeRemaining >= 0 ? p.BatteryLifeRemaining / 60 : -1;
             return new BatteryStatus(true, pct, onAc, charging, minutes);
         }
         catch
@@ -82,15 +85,32 @@ public static class SystemMonitorService
             var psi = new ProcessStartInfo
             {
                 FileName = "powershell.exe",
-                Arguments = "-NoProfile -ExecutionPolicy Bypass -Command " + QuotePs(script),
                 RedirectStandardOutput = true,
+                RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
+                StandardOutputEncoding = System.Text.Encoding.UTF8,
+                StandardErrorEncoding = System.Text.Encoding.UTF8,
             };
-            using var proc = Process.Start(psi);
-            if (proc is null) return -1;
-            var stdout = proc.StandardOutput.ReadToEnd();
-            proc.WaitForExit(4000);
+            psi.ArgumentList.Add("-NoProfile");
+            psi.ArgumentList.Add("-NonInteractive");
+            psi.ArgumentList.Add("-ExecutionPolicy");
+            psi.ArgumentList.Add("Bypass");
+            psi.ArgumentList.Add("-EncodedCommand");
+            psi.ArgumentList.Add(Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(script)));
+
+            using var proc = new Process { StartInfo = psi };
+            if (!proc.Start()) return -1;
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+            var stderrTask = proc.StandardError.ReadToEndAsync();
+            if (!proc.WaitForExit(4000))
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { /* ignore */ }
+                try { proc.WaitForExit(1000); } catch { /* ignore */ }
+                return -1;
+            }
+            Task.WaitAll([stdoutTask, stderrTask], 1000);
+            var stdout = stdoutTask.IsCompletedSuccessfully ? stdoutTask.Result : string.Empty;
             return long.TryParse(stdout.Trim(), out var v) ? v : -1;
         }
         catch
@@ -98,8 +118,6 @@ public static class SystemMonitorService
             return -1;
         }
     }
-
-    private static string QuotePs(string s) => "'" + s.Replace("'", "''", StringComparison.Ordinal) + "'";
 
     public static MemoryStatus GetMemory()
     {
@@ -130,9 +148,8 @@ public static class SystemMonitorService
 
             if (totalMb <= 0)
             {
-                // 兜底：无法取系统内存时，至少给进程级数据
-                totalMb = procMb;
-                usedMb = procMb;
+                // 系统内存读取失败时不要用当前进程冒充整机总量，否则会得到 100% 并误触发告警。
+                return new MemoryStatus(0, 0, 0, 0, procMb);
             }
 
             var pct = totalMb > 0 ? usedMb * 100.0 / totalMb : 0;
@@ -330,4 +347,3 @@ public static class SystemMonitorService
         return null;
     }
 }
-

@@ -243,10 +243,16 @@ public static class WindowsAgentToolkit
                 "open_url" => BrowserService.OpenUrl(Str(args, "url")),
                 "skill_list" => CompanionRuntime.Skills.ListText(),
                 "skill_get" => CompanionRuntime.Skills.GetBody(Str(args, "name")) ?? "未找到该技能",
-                "skill_run" => CompanionRuntime.Skills.RunCommand(Str(args, "name"), Str(args, "arguments"), Int(args, "timeout_seconds", 30)),
+                "skill_run" => await CompanionRuntime.Skills.RunCommandAsync(
+                        Str(args, "name"), Str(args, "arguments"), Int(args, "timeout_seconds", 30), ct)
+                    .ConfigureAwait(false),
                 "notify_user" => "OK: " + Str(args, "message"),
                 _ => $"错误：未知工具 {name}",
             };
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -411,6 +417,10 @@ public static class WindowsAgentToolkit
                 sb.AppendLine("说明: 基于公网 IP 的近似位置。");
                 return sb.ToString().Trim();
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
             catch
             {
                 // try next
@@ -446,6 +456,10 @@ public static class WindowsAgentToolkit
                     city = G(root, "city");
                 }
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
             catch
             {
                 // fall through
@@ -465,6 +479,10 @@ public static class WindowsAgentToolkit
             var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             if (resp.IsSuccessStatusCode)
                 return WeatherReport.FormatWeatherBroadcast(body, place);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -662,7 +680,6 @@ public static class WindowsAgentToolkit
         var psi = new ProcessStartInfo
         {
             FileName = "powershell.exe",
-            Arguments = "-NoProfile -ExecutionPolicy Bypass -Command " + QuotePs(command),
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -670,6 +687,12 @@ public static class WindowsAgentToolkit
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
+        psi.ArgumentList.Add("-NoProfile");
+        psi.ArgumentList.Add("-NonInteractive");
+        psi.ArgumentList.Add("-ExecutionPolicy");
+        psi.ArgumentList.Add("Bypass");
+        psi.ArgumentList.Add("-EncodedCommand");
+        psi.ArgumentList.Add(Convert.ToBase64String(Encoding.Unicode.GetBytes(command)));
 
         using var proc = new Process { StartInfo = psi };
         var stdout = new StringBuilder();
@@ -680,11 +703,23 @@ public static class WindowsAgentToolkit
         proc.BeginOutputReadLine();
         proc.BeginErrorReadLine();
 
-        var finished = await Task.Run(() => proc.WaitForExit(timeoutSec * 1000), ct).ConfigureAwait(false);
-        if (!finished)
+        using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        waitCts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
+        try
         {
-            try { proc.Kill(entireProcessTree: true); } catch { /* ignore */ }
+            await proc.WaitForExitAsync(waitCts.Token).ConfigureAwait(false);
+            // 确保异步 stdout/stderr 事件全部排空。
+            proc.WaitForExit();
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            await StopProcessAsync(proc).ConfigureAwait(false);
             return $"错误：命令超时（{timeoutSec}s）已终止。\nSTDOUT:\n{TrimOut(stdout)}\nSTDERR:\n{TrimOut(stderr)}";
+        }
+        catch (OperationCanceledException)
+        {
+            await StopProcessAsync(proc).ConfigureAwait(false);
+            throw;
         }
 
         return $"exit={proc.ExitCode}\nSTDOUT:\n{TrimOut(stdout)}\nSTDERR:\n{TrimOut(stderr)}";
@@ -723,6 +758,7 @@ public static class WindowsAgentToolkit
             }
         });
         thread.SetApartmentState(ApartmentState.STA);
+        thread.IsBackground = true;
         thread.Start();
         thread.Join(3000);
         return string.IsNullOrEmpty(text) ? "(剪贴板为空或不可读)" : text!;
@@ -737,6 +773,7 @@ public static class WindowsAgentToolkit
             catch (Exception ex) { err = ex; }
         });
         thread.SetApartmentState(ApartmentState.STA);
+        thread.IsBackground = true;
         thread.Start();
         thread.Join(3000);
         return err is null ? "剪贴板已更新" : "错误: " + err.Message;
@@ -968,8 +1005,22 @@ public static class WindowsAgentToolkit
         return false;
     }
 
-    private static string QuotePs(string command) =>
-        "'" + command.Replace("'", "''", StringComparison.Ordinal) + "'";
+    private static async Task StopProcessAsync(Process proc)
+    {
+        try
+        {
+            if (!proc.HasExited)
+                proc.Kill(entireProcessTree: true);
+        }
+        catch
+        {
+            // 权限不足时 Kill 可能失败，后续等待仍必须有上限。
+        }
+
+        using var cleanupCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        try { await proc.WaitForExitAsync(cleanupCts.Token).ConfigureAwait(false); }
+        catch { /* 清理超时不再阻塞聊天取消 */ }
+    }
 
     private static string TrimOut(StringBuilder sb)
     {

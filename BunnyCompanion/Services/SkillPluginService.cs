@@ -112,7 +112,11 @@ public sealed class SkillPluginService
     }
 
     /// <summary>执行技能里定义的命令（PowerShell 或可执行），返回输出。</summary>
-    public string RunCommand(string nameOrFile, string? arguments = null, int timeoutSec = 30)
+    public async Task<string> RunCommandAsync(
+        string nameOrFile,
+        string? arguments = null,
+        int timeoutSec = 30,
+        CancellationToken cancellationToken = default)
     {
         var skills = LoadAll();
         var hit = skills.FirstOrDefault(s => s.Name.Equals(nameOrFile, StringComparison.OrdinalIgnoreCase)
@@ -139,19 +143,27 @@ public sealed class SkillPluginService
             {
                 // 把 command 当作 PowerShell 命令体
                 var body = Regex.Replace(cmd, @"^(powershell|pwsh)\s+(-Command\s+)?", "", RegexOptions.IgnoreCase).Trim('"');
-                psi.FileName = "powershell.exe";
-                psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command " + QuotePs(body);
+                if (!string.IsNullOrWhiteSpace(arguments))
+                    body += " " + arguments;
+                psi.FileName = cmd.StartsWith("pwsh", StringComparison.OrdinalIgnoreCase)
+                    ? "pwsh.exe"
+                    : "powershell.exe";
+                psi.ArgumentList.Add("-NoProfile");
+                psi.ArgumentList.Add("-NonInteractive");
+                psi.ArgumentList.Add("-ExecutionPolicy");
+                psi.ArgumentList.Add("Bypass");
+                psi.ArgumentList.Add("-EncodedCommand");
+                psi.ArgumentList.Add(Convert.ToBase64String(Encoding.Unicode.GetBytes(body)));
             }
             else
             {
                 // 当作可执行路径 + 可选参数
-                var parts = SplitArgs(cmd);
-                psi.FileName = parts[0];
-                psi.Arguments = parts.Length > 1 ? string.Join(' ', parts[1..]) : "";
+                var (fileName, defaultArguments) = SplitCommand(cmd);
+                psi.FileName = fileName;
+                psi.Arguments = defaultArguments;
+                if (!string.IsNullOrWhiteSpace(arguments))
+                    psi.Arguments += " " + arguments;
             }
-
-            if (!string.IsNullOrWhiteSpace(arguments))
-                psi.Arguments += " " + arguments;
 
             using var proc = Process.Start(psi);
             if (proc is null) return "错误：无法启动进程";
@@ -161,13 +173,29 @@ public sealed class SkillPluginService
             proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) stderr.AppendLine(e.Data); };
             proc.BeginOutputReadLine();
             proc.BeginErrorReadLine();
-            var finished = proc.WaitForExit(timeoutSec * 1000);
-            if (!finished)
+            timeoutSec = Math.Clamp(timeoutSec, 5, 120);
+            using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            waitCts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
+            try
             {
-                try { proc.Kill(entireProcessTree: true); } catch { /* ignore */ }
+                await proc.WaitForExitAsync(waitCts.Token).ConfigureAwait(false);
+                proc.WaitForExit();
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                await StopProcessAsync(proc).ConfigureAwait(false);
                 return $"错误：命令超时（{timeoutSec}s）\nSTDOUT:\n{Trim(stdout)}\nSTDERR:\n{Trim(stderr)}";
             }
+            catch (OperationCanceledException)
+            {
+                await StopProcessAsync(proc).ConfigureAwait(false);
+                throw;
+            }
             return $"exit={proc.ExitCode}\nSTDOUT:\n{Trim(stdout)}\nSTDERR:\n{Trim(stderr)}";
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -260,12 +288,41 @@ public sealed class SkillPluginService
         return new Skill(fileName, name, desc ?? "", triggers, cmd, body);
     }
 
-    private static string QuotePs(string s) => "'" + s.Replace("'", "''", StringComparison.Ordinal) + "'";
-
-    private static string[] SplitArgs(string cmd)
+    private static (string FileName, string Arguments) SplitCommand(string command)
     {
-        // 简单按空格切，不处理引号嵌套（够用）
-        return cmd.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+        var cmd = command.Trim();
+        var unquotedWhole = cmd.Trim('"');
+        if (File.Exists(unquotedWhole))
+            return (unquotedWhole, string.Empty);
+
+        if (cmd.StartsWith('"'))
+        {
+            var closingQuote = cmd.IndexOf('"', 1);
+            if (closingQuote > 1)
+                return (cmd[1..closingQuote], cmd[(closingQuote + 1)..].Trim());
+        }
+
+        var separator = cmd.IndexOfAny([' ', '\t']);
+        return separator < 0
+            ? (cmd, string.Empty)
+            : (cmd[..separator], cmd[(separator + 1)..].Trim());
+    }
+
+    private static async Task StopProcessAsync(Process proc)
+    {
+        try
+        {
+            if (!proc.HasExited)
+                proc.Kill(entireProcessTree: true);
+        }
+        catch
+        {
+            // 权限不足时 Kill 可能失败，不能再用无期限等待拖住 Agent。
+        }
+
+        using var cleanupCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        try { await proc.WaitForExitAsync(cleanupCts.Token).ConfigureAwait(false); }
+        catch { /* 清理超时后返回，避免停止按钮卡死 */ }
     }
 
     private static string Trim(StringBuilder sb)

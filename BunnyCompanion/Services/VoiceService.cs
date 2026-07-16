@@ -3,6 +3,8 @@ using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json.Nodes;
+using System.Diagnostics;
+using System.IO;
 
 namespace BunnyCompanion.Services;
 
@@ -57,6 +59,19 @@ public static class VoiceService
                 EnsureVoice();
                 return _voice is not null;
             }
+        }
+    }
+
+    /// <summary>Windows PowerShell 与系统语音组件是当前离线识别链路的运行前提。</summary>
+    public static bool IsRecognitionAvailable
+    {
+        get
+        {
+            if (!OperatingSystem.IsWindows())
+                return false;
+            var systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
+            var powerShell = Path.Combine(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+            return File.Exists(powerShell);
         }
     }
 
@@ -181,6 +196,7 @@ public static class VoiceService
             // SAPI 识别器 COM 定义较繁琐，且共享识别器会抢系统语音焦点。
             // 这里用 PowerShell 调 SAPI 做一次性识别，避免大段 COM 定义。
             var script = """
+                [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
                 Add-Type -AssemblyName System.Speech
                 $r = New-Object System.Speech.Recognition.SpeechRecognitionEngine
                 $r.SetInputToDefaultAudioInput()
@@ -201,24 +217,49 @@ public static class VoiceService
 
     private static string RunPsCapture(string script, int timeoutMs)
     {
-        var psi = new System.Diagnostics.ProcessStartInfo
+        timeoutMs = Math.Clamp(timeoutMs, 1000, 30000);
+        var encodedCommand = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+        var systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
+        var powerShell = Path.Combine(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+        var psi = new ProcessStartInfo
         {
-            FileName = "powershell.exe",
-            Arguments = "-NoProfile -ExecutionPolicy Bypass -Command " + QuotePs(script),
+            FileName = File.Exists(powerShell) ? powerShell : "powershell.exe",
             RedirectStandardOutput = true,
+            RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
         };
-        using var proc = System.Diagnostics.Process.Start(psi);
-        if (proc is null) return string.Empty;
-        var stdout = proc.StandardOutput.ReadToEnd();
-        proc.WaitForExit(timeoutMs);
-        if (!proc.HasExited)
+        psi.ArgumentList.Add("-NoProfile");
+        psi.ArgumentList.Add("-NonInteractive");
+        psi.ArgumentList.Add("-ExecutionPolicy");
+        psi.ArgumentList.Add("Bypass");
+        psi.ArgumentList.Add("-EncodedCommand");
+        psi.ArgumentList.Add(encodedCommand);
+
+        using var proc = new Process { StartInfo = psi };
+        if (!proc.Start())
+            return string.Empty;
+
+        // 先异步排空管道，再等待退出；否则 ReadToEnd 会让超时保护永远到不了。
+        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+        var stderrTask = proc.StandardError.ReadToEndAsync();
+        if (!proc.WaitForExit(timeoutMs))
         {
             try { proc.Kill(entireProcessTree: true); } catch { /* ignore */ }
+            try { proc.WaitForExit(2000); } catch { /* ignore */ }
+            return string.Empty;
         }
-        return stdout ?? string.Empty;
-    }
 
-    private static string QuotePs(string s) => "'" + s.Replace("'", "''", StringComparison.Ordinal) + "'";
+        try
+        {
+            Task.WaitAll([stdoutTask, stderrTask], 2000);
+            return stdoutTask.IsCompletedSuccessfully ? stdoutTask.Result : string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
 }

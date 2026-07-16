@@ -23,8 +23,10 @@ public sealed class HotkeyService : IDisposable
     public const int IdHelp = 5;
 
     private HwndSource? _source;
-    private bool _registered;
     private Action<int>? _onHotkey;
+    private readonly HashSet<int> _registeredIds = [];
+
+    public IReadOnlyList<int> FailedHotkeyIds { get; private set; } = [];
 
     [DllImport("user32.dll")]
     private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
@@ -43,12 +45,22 @@ public sealed class HotkeyService : IDisposable
 
         var mods = ModControl | ModShift | ModNoRepeat;
         // S / C / P / OemComma(,) / H
-        RegisterHotKey(helper.Handle, IdToggleVisible, mods, 0x53);
-        RegisterHotKey(helper.Handle, IdOpenChat, mods, 0x43);
-        RegisterHotKey(helper.Handle, IdClickThrough, mods, 0x50);
-        RegisterHotKey(helper.Handle, IdSettings, mods, 0xBC); // VK_OEM_COMMA
-        RegisterHotKey(helper.Handle, IdHelp, mods, 0x48);
-        _registered = true;
+        _registeredIds.Clear();
+        var failed = new List<int>();
+        Register(IdToggleVisible, 0x53);
+        Register(IdOpenChat, 0x43);
+        Register(IdClickThrough, 0x50);
+        Register(IdSettings, 0xBC); // VK_OEM_COMMA
+        Register(IdHelp, 0x48);
+        FailedHotkeyIds = failed;
+
+        void Register(int id, uint key)
+        {
+            if (RegisterHotKey(helper.Handle, id, mods, key))
+                _registeredIds.Add(id);
+            else
+                failed.Add(id);
+        }
     }
 
     private IntPtr Hook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -63,14 +75,16 @@ public sealed class HotkeyService : IDisposable
 
     public void Dispose()
     {
-        if (!_registered || _source is null)
+        if (_source is null)
             return;
         var hwnd = _source.Handle;
-        for (var id = IdToggleVisible; id <= IdHelp; id++)
+        foreach (var id in _registeredIds)
         {
             try { UnregisterHotKey(hwnd, id); } catch { /* ignore */ }
         }
         _source.RemoveHook(Hook);
-        _registered = false;
+        _registeredIds.Clear();
+        _source = null;
+        _onHotkey = null;
     }
 }

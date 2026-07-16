@@ -15,6 +15,7 @@ public static class BrowserService
     private static readonly HttpClient Http = new()
     {
         Timeout = TimeSpan.FromSeconds(20),
+        MaxResponseContentBufferSize = 4 * 1024 * 1024,
     };
 
     static BrowserService()
@@ -89,10 +90,9 @@ public static class BrowserService
     {
         if (string.IsNullOrWhiteSpace(url))
             return "错误：URL 为空";
-        url = url.Trim();
-        if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
-            && !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-            url = "https://" + url;
+        if (!TryNormalizeWebUrl(url, out url))
+            return "错误：URL 格式无效，仅支持 http/https";
+        maxChars = Math.Clamp(maxChars, 500, 50_000);
 
         try
         {
@@ -104,6 +104,10 @@ public static class BrowserService
             if (text.Length > maxChars)
                 text = text[..maxChars] + "\n…（网页较长，已截断）";
             return $"URL: {url}\n----\n{text}";
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -169,10 +173,8 @@ public static class BrowserService
     {
         if (string.IsNullOrWhiteSpace(url))
             return "错误：URL 为空";
-        url = url.Trim();
-        if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
-            && !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-            url = "https://" + url;
+        if (!TryNormalizeWebUrl(url, out url))
+            return "错误：URL 格式无效，仅支持 http/https";
         try
         {
             Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
@@ -182,5 +184,20 @@ public static class BrowserService
         {
             return $"打开失败: {ex.Message}";
         }
+    }
+
+    private static bool TryNormalizeWebUrl(string raw, out string normalized)
+    {
+        normalized = string.Empty;
+        var candidate = raw.Trim();
+        if (!candidate.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+            && !candidate.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            candidate = "https://" + candidate;
+        if (!Uri.TryCreate(candidate, UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+            || string.IsNullOrWhiteSpace(uri.Host))
+            return false;
+        normalized = uri.AbsoluteUri;
+        return true;
     }
 }

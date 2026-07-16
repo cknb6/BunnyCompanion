@@ -46,6 +46,8 @@ Remove-Item $PublishDirectory -Recurse -Force -ErrorAction SilentlyContinue
 if (-not (Test-Path $DeliveryDirectory)) {
     New-Item $DeliveryDirectory -ItemType Directory -Force | Out-Null
 }
+# 旧版曾使用所有架构共用的校验文件，会造成覆盖；发现后定向移除。
+Remove-Item (Join-Path $DeliveryDirectory "版本校验.txt") -Force -ErrorAction SilentlyContinue
 New-Item $PublishDirectory -ItemType Directory -Force | Out-Null
 
 Write-Host "正在发布 $Runtime 自包含单文件……" -ForegroundColor Cyan
@@ -97,7 +99,7 @@ if (Test-Path $ReadmeSrc) {
 }
 
 $Hash = (Get-FileHash $EnglishExe -Algorithm SHA256).Hash
-$CheckPath = Join-Path $DeliveryDirectory "版本校验.txt"
+$CheckPath = Join-Path $DeliveryDirectory "版本校验-$Runtime.txt"
 $Line = @"
 [$Runtime]
 文件（中文名）：$FriendlyName
@@ -107,18 +109,17 @@ SHA256：$Hash
 构建时间：$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
 
 "@
-if (Test-Path $CheckPath) {
-    Add-Content -LiteralPath $CheckPath -Value $Line -Encoding UTF8
-} else {
-    # 版本号从 csproj 读取，避免与程序内不一致
-    $Csproj = Join-Path $ProjectRoot "BunnyCompanion\BunnyCompanion.csproj"
-    $Ver = "0.0.0"
-    if (Test-Path $Csproj) {
-        $m = [regex]::Match((Get-Content $Csproj -Raw), '<Version>([^<]+)</Version>')
-        if ($m.Success) { $Ver = $m.Groups[1].Value }
-    }
-    $Header = "小申陪伴 $Ver（自包含 · 免装 .NET）`n每架构一个 EXE，请按电脑 CPU 选择下载。`n`n"
-    Set-Content -LiteralPath $CheckPath -Value ($Header + $Line) -Encoding UTF8
+# 版本号从 csproj 读取，避免与程序内不一致。每次覆盖当前 RID，杜绝重复构建累积旧哈希。
+$Csproj = Join-Path $ProjectRoot "BunnyCompanion\BunnyCompanion.csproj"
+$Ver = $null
+if (Test-Path $Csproj) {
+    $m = [regex]::Match((Get-Content $Csproj -Raw), '<Version>([^<]+)</Version>')
+    if ($m.Success) { $Ver = $m.Groups[1].Value.Trim() }
 }
+if ([string]::IsNullOrWhiteSpace($Ver) -or $Ver -notmatch '^\d+\.\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?$') {
+    throw "无法从 BunnyCompanion.csproj 读取有效的 <Version>。"
+}
+$Header = "小申陪伴 $Ver（自包含 · 免装 .NET）`n每架构一个 EXE，请按电脑 CPU 选择下载。`n`n"
+Set-Content -LiteralPath $CheckPath -Value ($Header + $Line) -Encoding UTF8
 
 Write-Host "完成：$FriendlyExe / $EnglishExe （$SizeMb MB）" -ForegroundColor Green

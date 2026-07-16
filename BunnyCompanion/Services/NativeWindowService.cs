@@ -122,6 +122,11 @@ public static class NativeWindowService
         if (monitor == IntPtr.Zero || !GetMonitorInfo(monitor, ref info))
             return true;
 
+        // 只在同一块显示器上隐藏桌宠；另一块屏幕全屏不会遮挡当前桌宠。
+        var petMonitor = MonitorFromWindow(petHandle, MonitorDefaultToNearest);
+        if (petMonitor == IntPtr.Zero || petMonitor != monitor)
+            return true;
+
         // 窗口几乎铺满整块物理显示器时才视为全屏
         const int tolerance = 4;
         isFullscreen = windowRect.Left <= info.Monitor.Left + tolerance

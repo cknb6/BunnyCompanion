@@ -73,6 +73,8 @@ public sealed class PetSettings
             LoveMessages = DefaultMessages();
         if (FirstMetDate == default)
             FirstMetDate = DateTime.Today;
+        SystemTriggers ??= new SystemTriggerConfig();
+        SystemTriggers.Normalize();
     }
 
     private static string NormalizeTimeText(string? value, string fallback) =>

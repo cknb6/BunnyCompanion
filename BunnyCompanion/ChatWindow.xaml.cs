@@ -26,6 +26,8 @@ public partial class ChatWindow : Window
     private readonly Action<AgentResult> _onPetReply;
     private readonly Action _onUserSpoke;
     private bool _busy;
+    private bool _loadingAttachments;
+    private bool _cancelRequested;
     private CancellationTokenSource? _cts;
     private readonly List<PendingAttachment> _pending = [];
     private DateTime _lastTimeStampShown = DateTime.MinValue;
@@ -35,11 +37,13 @@ public partial class ChatWindow : Window
         public required string Path { get; init; }
         public required string FileName { get; init; }
         public required ChatAttachmentKind Kind { get; init; }
-        public string? MimeType { get; init; }
+        public string? MimeType { get; set; }
         public string? TextPreview { get; set; }
         public byte[]? ImageBytes { get; set; }
         public long SizeBytes { get; init; }
     }
+
+    private sealed record AttachmentLoadResult(PendingAttachment? Item, string? Message);
 
     public ChatWindow(
         PetSettings settings,
@@ -56,6 +60,7 @@ public partial class ChatWindow : Window
         _onUserSpoke = onUserSpoke;
         TitleText.Text = settings.PetName;
         Title = settings.PetName;
+        Topmost = settings.AlwaysOnTop;
         Closed += (_, _) =>
         {
             _cts?.Cancel();
@@ -89,11 +94,15 @@ public partial class ChatWindow : Window
                     SystemParameters.WorkArea.Width,
                     SystemParameters.WorkArea.Height);
 
-            // 约 1/3 宽、3/4 高，限制在合理区间
-            Width = Math.Clamp(area.Width * 0.34, 360, 560);
-            Height = Math.Clamp(area.Height * 0.78, 520, 860);
-            MinWidth = Math.Min(320, area.Width * 0.4);
-            MinHeight = Math.Min(420, area.Height * 0.5);
+            // 约 1/3 宽、3/4 高，并保证在小屏/高 DPI 下输入区始终可见。
+            var maxWidth = Math.Max(280, area.Width - 24);
+            var maxHeight = Math.Max(360, area.Height - 24);
+            MinWidth = Math.Min(320, maxWidth);
+            MinHeight = Math.Min(420, maxHeight);
+            MaxWidth = maxWidth;
+            MaxHeight = maxHeight;
+            Width = Math.Min(Math.Clamp(area.Width * 0.34, 360, 560), maxWidth);
+            Height = Math.Min(Math.Clamp(area.Height * 0.78, 520, 860), maxHeight);
         }
         catch
         {
@@ -109,13 +118,16 @@ public partial class ChatWindow : Window
             // 双击顶栏：在自适应尺寸与最大化高度之间切换
             try
             {
-                var area = SystemParameters.WorkArea;
-                if (Math.Abs(Height - area.Height) < 8)
+                var area = ScreenService.GetWorkingArea(this);
+                var targetHeight = double.IsFinite(MaxHeight)
+                    ? Math.Min(MaxHeight, area.Height)
+                    : Math.Max(360, area.Height - 24);
+                if (Math.Abs(Height - targetHeight) < 8)
                     FitToScreen();
                 else
                 {
-                    Height = area.Height;
-                    Top = area.Top;
+                    Height = targetHeight;
+                    Top = area.Top + Math.Max(0, (area.Height - targetHeight) / 2);
                     Left = Math.Clamp(Left, area.Left, area.Right - Width);
                 }
             }
@@ -134,8 +146,15 @@ public partial class ChatWindow : Window
     private void MinimizeButton_Click(object sender, RoutedEventArgs e) =>
         WindowState = WindowState.Minimized;
 
-    private void SendButton_Click(object sender, RoutedEventArgs e) =>
+    private void SendButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy)
+        {
+            CancelCurrentRequest();
+            return;
+        }
         _ = SendAsync(includeDesktop: DesktopCheck.IsChecked == true);
+    }
 
     private void LookDesktop_Click(object sender, RoutedEventArgs e)
     {
@@ -170,9 +189,9 @@ public partial class ChatWindow : Window
         AttachBar.Visibility = Visibility.Collapsed;
     }
 
-    private void AttachButton_Click(object sender, RoutedEventArgs e)
+    private async void AttachButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_busy)
+        if (_busy || _loadingAttachments)
             return;
 
         var dialog = new OpenFileDialog
@@ -189,31 +208,55 @@ public partial class ChatWindow : Window
         if (dialog.ShowDialog(this) != true)
             return;
 
-        foreach (var path in dialog.FileNames)
-            TryAddAttachment(path);
+        var previousStatus = StatusText.Text;
+        _loadingAttachments = true;
+        AttachButton.IsEnabled = false;
+        SendButton.IsEnabled = false;
+        StatusText.Text = "正在读取附件…";
+        try
+        {
+            foreach (var path in dialog.FileNames)
+            {
+                if (_pending.Count >= 6)
+                {
+                    AppendSystemTip("一次最多 6 个附件，其余文件已跳过。");
+                    break;
+                }
 
-        RefreshAttachBar();
+                var result = await Task.Run(() => LoadAttachment(path)).ConfigureAwait(true);
+                if (!IsLoaded)
+                    return;
+                if (result.Item is not null)
+                    _pending.Add(result.Item);
+                if (!string.IsNullOrWhiteSpace(result.Message))
+                    AppendSystemTip(result.Message);
+            }
+        }
+        finally
+        {
+            _loadingAttachments = false;
+            if (IsLoaded)
+            {
+                RefreshAttachBar();
+                AttachButton.IsEnabled = !_busy;
+                SendButton.IsEnabled = !_busy;
+                if (StatusText.Text == "正在读取附件…")
+                    StatusText.Text = previousStatus;
+            }
+        }
     }
 
-    private void TryAddAttachment(string path)
+    private static AttachmentLoadResult LoadAttachment(string path)
     {
         try
         {
             if (!File.Exists(path))
-                return;
-            if (_pending.Count >= 6)
-            {
-                StatusText.Text = "一次最多 6 个附件";
-                return;
-            }
+                return new AttachmentLoadResult(null, "文件不存在或已被移动，已跳过。");
 
             var info = new FileInfo(path);
             // 单文件上限 8MB，避免撑爆 API
             if (info.Length > 8 * 1024 * 1024)
-            {
-                AppendSystemTip($"「{info.Name}」超过 8MB，已跳过。");
-                return;
-            }
+                return new AttachmentLoadResult(null, $"「{info.Name}」超过 8MB，已跳过。");
 
             var ext = info.Extension.ToLowerInvariant();
             var kind = ClassifyAttachment(ext);
@@ -228,10 +271,12 @@ public partial class ChatWindow : Window
 
             if (kind == ChatAttachmentKind.Image)
             {
-                item.ImageBytes = File.ReadAllBytes(path);
-                // 过大图压缩到 JPEG 再发（视觉接口更稳）
-                if (item.ImageBytes.Length > 1_200_000)
-                    item.ImageBytes = TryDownscaleImage(item.ImageBytes) ?? item.ImageBytes;
+                var original = File.ReadAllBytes(path);
+                // 所有图片统一解码并限到 1280px，防止小体积超大像素图耗尽内存。
+                var normalized = TryDownscaleImage(original);
+                item.ImageBytes = normalized ?? original;
+                if (normalized is not null)
+                    item.MimeType = "image/jpeg";
             }
             else if (kind == ChatAttachmentKind.Text)
             {
@@ -240,15 +285,15 @@ public partial class ChatWindow : Window
             }
             else
             {
-                AppendSystemTip($"「{info.Name}」类型暂不支持解析，可改发图片或文本/代码。");
-                return;
+                return new AttachmentLoadResult(
+                    null, $"「{info.Name}」类型暂不支持解析，可改发图片或文本/代码。");
             }
 
-            _pending.Add(item);
+            return new AttachmentLoadResult(item, null);
         }
         catch
         {
-            AppendSystemTip("读取文件失败，请换一个文件试试。");
+            return new AttachmentLoadResult(null, "读取文件失败，请换一个文件试试。");
         }
     }
 
@@ -302,7 +347,13 @@ public partial class ChatWindow : Window
     private void Window_KeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key == Key.Escape)
-            Close();
+        {
+            if (_busy)
+                CancelCurrentRequest();
+            else
+                Close();
+            e.Handled = true;
+        }
     }
 
     private void QuickChip_Click(object sender, RoutedEventArgs e)
@@ -318,7 +369,7 @@ public partial class ChatWindow : Window
 
     private async Task SendAsync(bool includeDesktop)
     {
-        if (_busy)
+        if (_busy || _loadingAttachments)
             return;
 
         var text = InputBox.Text.Trim();
@@ -341,15 +392,20 @@ public partial class ChatWindow : Window
         }
 
         _onUserSpoke();
-        SetBusy(true, includeDesktop ? "正在看你的桌面…" : hasAttach ? "正在看你发的文件…" : "小申 Agent 思考中…");
         _cts?.Cancel();
         _cts?.Dispose();
-        _cts = new CancellationTokenSource();
+        var requestCts = new CancellationTokenSource();
+        _cts = requestCts;
+        _cancelRequested = false;
+        SetBusy(true, includeDesktop ? "正在看你的桌面…" : hasAttach ? "正在看你发的文件…" : "在线思考中…");
+        var finalStatus = "在线";
 
         // UI 线程进度：工具执行状态显示在状态栏
         var progress = new Progress<string>(msg =>
         {
-            if (!IsLoaded) return;
+            if (!IsLoaded || !_busy || !ReferenceEquals(_cts, requestCts)
+                          || requestCts.IsCancellationRequested)
+                return;
             StatusText.Text = msg;
             TypingHint.Text = msg;
         });
@@ -363,7 +419,7 @@ public partial class ChatWindow : Window
                     _hostWindow,
                     attachments,
                     progress,
-                    _cts.Token)
+                    requestCts.Token)
                 .ConfigureAwait(true);
             if (!IsLoaded)
                 return;
@@ -382,12 +438,14 @@ public partial class ChatWindow : Window
             if (result.UsedDesktopImage) status = "已看桌面 · " + status;
             if (result.ToolTrace is { Count: > 0 }) status += " · 已调用本机工具";
             StatusText.Text = status;
+            finalStatus = status;
             // TTS 朗读回复（需用户在设置开启，且非安静时段）
             TrySpeakReply(result.Text);
             _onPetReply(result);
         }
         catch (OperationCanceledException)
         {
+            finalStatus = "已停止";
             if (IsLoaded)
                 AppendBubble(_settings.PetName, "好，那先这样～", isPet: true);
         }
@@ -402,16 +460,34 @@ public partial class ChatWindow : Window
                     isPet: true);
                 StatusText.Text = "本地陪伴";
             }
+            finalStatus = "本地陪伴";
             _onPetReply(new AgentResult(offline.Text, offline.ActionKey, offline.AffectionGain, "本地", false));
         }
         finally
         {
+            if (ReferenceEquals(_cts, requestCts))
+            {
+                _cts.Dispose();
+                _cts = null;
+            }
             if (IsLoaded)
             {
-                SetBusy(false, "在线");
+                SetBusy(false, finalStatus);
                 InputBox.Focus();
             }
         }
+    }
+
+    private void CancelCurrentRequest()
+    {
+        if (!_busy || _cancelRequested)
+            return;
+        _cancelRequested = true;
+        StatusText.Text = "正在停止…";
+        TypingHint.Text = "正在停止…";
+        SendButton.Content = "停止中…";
+        SendButton.IsEnabled = false;
+        _cts?.Cancel();
     }
 
     private List<ChatAttachment> SnapshotAttachments()
@@ -462,13 +538,16 @@ public partial class ChatWindow : Window
     private void SetBusy(bool busy, string status)
     {
         _busy = busy;
-        SendButton.IsEnabled = !busy;
+        if (!busy)
+            _cancelRequested = false;
+        SendButton.IsEnabled = !_loadingAttachments && (!busy || !_cancelRequested);
         InputBox.IsEnabled = !busy;
         DesktopCheck.IsEnabled = !busy;
         AttachButton.IsEnabled = !busy;
         StatusText.Text = status;
         TypingHint.Text = busy ? "正在输入…" : string.Empty;
-        SendButton.Content = busy ? "…" : "发送";
+        SendButton.Content = busy ? "停止" : "发送";
+        SendButton.Background = ColorBrush(busy ? "#E15B64" : "#07C160");
         if (Content is DependencyObject root)
             SetButtonsEnabled(root, !busy);
     }
@@ -810,7 +889,7 @@ public partial class ChatWindow : Window
             AppendSystemTip("语音输入未开启，可在设置中打开。");
             return;
         }
-        if (!VoiceService.IsTtsAvailable && !IsSpeechLikelyAvailable())
+        if (!VoiceService.IsRecognitionAvailable)
         {
             AppendSystemTip("未检测到 Windows 语音识别，请确认系统已启用语音功能。");
             return;
@@ -826,6 +905,8 @@ public partial class ChatWindow : Window
             var text = VoiceService.RecognizeOnce(7000);
             Dispatcher.Invoke(() =>
             {
+                if (!IsLoaded)
+                    return;
                 VoiceButton.Content = oldContent;
                 VoiceButton.IsEnabled = true;
                 if (string.IsNullOrWhiteSpace(text))
@@ -840,9 +921,6 @@ public partial class ChatWindow : Window
             });
         });
     }
-
-    private static bool IsSpeechLikelyAvailable() =>
-        OperatingSystem.IsWindows();
 
     /// <summary>开启 TTS 且非安静时段时，朗读回复（截断到合理长度，避免长文念太久）。</summary>
     private void TrySpeakReply(string text)

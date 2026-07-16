@@ -2,8 +2,8 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="小申陪伴 · 个性化设置"
-        Width="590" Height="760" MinWidth="540" MinHeight="620"
-        WindowStartupLocation="CenterScreen"
+        Width="590" Height="760" MinWidth="500" MinHeight="420"
+        WindowStartupLocation="CenterOwner" Loaded="Window_Loaded"
         Background="#FFF9FB" FontFamily="Microsoft YaHei UI"
         ShowInTaskbar="True">
   <Window.Resources>
@@ -95,6 +95,53 @@
               <TextBlock x:Name="ScaleValueText" Grid.Column="2" TextAlignment="Right"
                          VerticalAlignment="Center" Foreground="#A84C6E" />
             </Grid>
+          </StackPanel>
+        </Border>
+
+        <Border Style="{StaticResource SectionStyle}">
+          <StackPanel>
+            <TextBlock Text="语音与系统关怀" FontSize="16" FontWeight="SemiBold" Foreground="#A84C6E" />
+            <WrapPanel Margin="0,9,0,0">
+              <CheckBox x:Name="TtsCheck" Content="朗读回复" />
+              <CheckBox x:Name="VoiceInputCheck" Content="语音输入" />
+              <CheckBox x:Name="SystemTriggerCheck" Content="启用系统状态提醒" />
+            </WrapPanel>
+            <TextBlock Text="阈值填写 0 可关闭对应提醒；系统状态只在非安静时段提示。"
+                       FontSize="11.5" Foreground="#917B85" TextWrapping="Wrap" />
+            <Grid Margin="0,13,0,0">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="18" />
+                <ColumnDefinition Width="*" />
+              </Grid.ColumnDefinitions>
+              <StackPanel>
+                <TextBlock Text="CPU 提醒阈值（0–100%）" />
+                <TextBox x:Name="CpuThresholdBox" MaxLength="3" />
+              </StackPanel>
+              <StackPanel Grid.Column="2">
+                <TextBlock Text="内存提醒阈值（0–100%）" />
+                <TextBox x:Name="MemoryThresholdBox" MaxLength="3" />
+              </StackPanel>
+            </Grid>
+            <Grid Margin="0,13,0,0">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="18" />
+                <ColumnDefinition Width="*" />
+              </Grid.ColumnDefinitions>
+              <StackPanel>
+                <TextBlock Text="低电量提醒阈值（0–100%）" />
+                <TextBox x:Name="BatteryThresholdBox" MaxLength="3" />
+              </StackPanel>
+              <StackPanel Grid.Column="2">
+                <TextBlock Text="离开多久算久离（分钟，0 关闭）" />
+                <TextBox x:Name="IdleMinutesBox" MaxLength="4" />
+              </StackPanel>
+            </Grid>
+            <StackPanel Margin="0,13,0,0">
+              <TextBlock Text="同类提醒冷却（分钟，1–1440）" />
+              <TextBox x:Name="TriggerCooldownBox" MaxLength="4" />
+            </StackPanel>
           </StackPanel>
         </Border>
 

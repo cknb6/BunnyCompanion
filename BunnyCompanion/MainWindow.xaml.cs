@@ -39,8 +39,8 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _reminderTimer = new() { Interval = TimeSpan.FromSeconds(30) };
     private readonly DispatcherTimer _fullscreenTimer = new() { Interval = TimeSpan.FromSeconds(2) };
     private readonly DispatcherTimer _focusTimer = new() { Interval = TimeSpan.FromSeconds(1) };
-    /// <summary>系统监控触发器：CPU/内存/电池/久坐提醒。2 分钟采样一次，避免频繁取样。</summary>
-    private readonly DispatcherTimer _systemTriggerTimer = new() { Interval = TimeSpan.FromSeconds(120) };
+    /// <summary>闲置状态每 15 秒轻量检查；CPU/内存/电池仍限制为 2 分钟采样。</summary>
+    private readonly DispatcherTimer _systemTriggerTimer = new() { Interval = TimeSpan.FromSeconds(15) };
     /// <summary>定期自愈：穿透残留 / 拖拽卡死 / 透明度动画卡住导致点不上。</summary>
     private readonly DispatcherTimer _inputHealTimer = new() { Interval = TimeSpan.FromSeconds(1.2) };
 
@@ -58,6 +58,8 @@ public partial class MainWindow : Window
     private Point _dragStartScreen;
     private double _dragStartLeft;
     private double _dragStartTop;
+    private double _dragDpiScaleX = 1;
+    private double _dragDpiScaleY = 1;
     private bool _isExiting;
     private bool _isUninstalling;
     private bool _initialized;
@@ -83,6 +85,7 @@ public partial class MainWindow : Window
     private Forms.ToolStripMenuItem? _clickThroughMenuItem;
     private Forms.ToolStripMenuItem? _fullscreenMenuItem;
     private Forms.ToolStripMenuItem? _focusMenuItem;
+    private string? _hotkeyWarning;
     private ChatWindow? _chatWindow;
     private int _rapidClickCount;
     private DateTime _lastRapidClickAt = DateTime.MinValue;
@@ -96,6 +99,10 @@ public partial class MainWindow : Window
     private DateTime _lastMemoCheck = DateTime.MinValue;
     /// <summary>系统触发器节流：记录上次触发时间，避免同类提醒刷屏。</summary>
     private DateTime _lastSystemTriggerAt = DateTime.MinValue;
+    /// <summary>记录用户是否已长时间离开；欢迎提醒只在重新操作电脑后显示。</summary>
+    private bool _wasUserAway;
+    /// <summary>上次重型资源采样时间，避免频繁启动性能计数器和 PowerShell。</summary>
+    private DateTime _lastSystemResourceSampleAt = DateTime.MinValue;
 
     private bool IsFocusActive => _focusEnd is { } end && end > DateTime.Now;
     private bool IsExclusiveBusy => DateTime.Now < _exclusiveUntil || _isDragging || _introPlaying;
@@ -245,6 +252,8 @@ public partial class MainWindow : Window
     {
         _settings.Normalize();
         Topmost = _settings.AlwaysOnTop;
+        if (_chatWindow is { IsLoaded: true })
+            _chatWindow.Topmost = _settings.AlwaysOnTop;
 
         var oldBottom = Top + Height;
         var oldCenter = Left + Width / 2;
@@ -502,14 +511,14 @@ public partial class MainWindow : Window
             return best;
         // 3px 邻域，抗锯齿/缩放采样更稳
         for (var dy = -2; dy <= 2; dy++)
-        for (var dx = -2; dx <= 2; dx++)
-        {
-            var nx = x + dx;
-            var ny = y + dy;
-            if (nx < 0 || ny < 0 || nx >= width || ny >= height)
-                continue;
-            best = Math.Max(best, alpha[ny * width + nx]);
-        }
+            for (var dx = -2; dx <= 2; dx++)
+            {
+                var nx = x + dx;
+                var ny = y + dy;
+                if (nx < 0 || ny < 0 || nx >= width || ny >= height)
+                    continue;
+                best = Math.Max(best, alpha[ny * width + nx]);
+            }
         return best;
     }
 
@@ -844,6 +853,9 @@ public partial class MainWindow : Window
         _dragStartScreen = PointToScreen(e.GetPosition(this));
         _dragStartLeft = Left;
         _dragStartTop = Top;
+        var startDpi = VisualTreeHelper.GetDpi(this);
+        _dragDpiScaleX = Math.Max(0.1, startDpi.DpiScaleX);
+        _dragDpiScaleY = Math.Max(0.1, startDpi.DpiScaleY);
         try
         {
             PetImage.CaptureMouse();
@@ -869,8 +881,22 @@ public partial class MainWindow : Window
 
         var current = PointToScreen(e.GetPosition(this));
         var dpi = VisualTreeHelper.GetDpi(this);
-        var deltaX = (current.X - _dragStartScreen.X) / dpi.DpiScaleX;
-        var deltaY = (current.Y - _dragStartScreen.Y) / dpi.DpiScaleY;
+        var scaleX = Math.Max(0.1, dpi.DpiScaleX);
+        var scaleY = Math.Max(0.1, dpi.DpiScaleY);
+        if (Math.Abs(scaleX - _dragDpiScaleX) > 0.001 || Math.Abs(scaleY - _dragDpiScaleY) > 0.001)
+        {
+            // 跨入不同缩放比例的显示器后重建锚点，避免把此前累计像素按新 DPI 全量重算而跳动。
+            _dragStartScreen = current;
+            _dragStartLeft = Left;
+            _dragStartTop = Top;
+            _dragDpiScaleX = scaleX;
+            _dragDpiScaleY = scaleY;
+            _dragLastDeltaX = 0;
+            _dragLastDeltaY = 0;
+            return;
+        }
+        var deltaX = (current.X - _dragStartScreen.X) / _dragDpiScaleX;
+        var deltaY = (current.Y - _dragStartScreen.Y) / _dragDpiScaleY;
         _dragLastDeltaX = deltaX;
         _dragLastDeltaY = deltaY;
         if (!_dragMoved && Math.Abs(deltaX) + Math.Abs(deltaY) > 5)
@@ -1055,8 +1081,13 @@ public partial class MainWindow : Window
     private void OpenChat()
     {
         EnsureVisible();
-        if (_chatWindow is { IsLoaded: true, IsVisible: true })
+        if (_chatWindow is { IsLoaded: true })
         {
+            if (_chatWindow.WindowState == WindowState.Minimized)
+                _chatWindow.WindowState = WindowState.Normal;
+            if (!_chatWindow.IsVisible)
+                _chatWindow.Show();
+            _chatWindow.Topmost = _settings.AlwaysOnTop;
             _chatWindow.Activate();
             return;
         }
@@ -1080,7 +1111,10 @@ public partial class MainWindow : Window
                 StopWalking(recover: false);
                 _exclusiveUntil = DateTime.Now.AddSeconds(1.5);
                 AddAffection(1);
-            });
+            })
+        {
+            Topmost = _settings.AlwaysOnTop,
+        };
 
         PositionChatWindow(_chatWindow);
         _chatWindow.Closed += (_, _) => _chatWindow = null;
@@ -1098,8 +1132,14 @@ public partial class MainWindow : Window
             // 先按工作区给聊天窗合理尺寸，再定位（避免 Width 未布局时为 NaN）
             if (chat is ChatWindow)
             {
-                chat.Width = Math.Clamp(area.Width * 0.34, 360, 560);
-                chat.Height = Math.Clamp(area.Height * 0.78, 520, 860);
+                var maxWidth = Math.Max(280, area.Width - 24);
+                var maxHeight = Math.Max(360, area.Height - 24);
+                chat.MinWidth = Math.Min(320, maxWidth);
+                chat.MinHeight = Math.Min(420, maxHeight);
+                chat.MaxWidth = maxWidth;
+                chat.MaxHeight = maxHeight;
+                chat.Width = Math.Min(Math.Clamp(area.Width * 0.34, 360, 560), maxWidth);
+                chat.Height = Math.Min(Math.Clamp(area.Height * 0.78, 520, 860), maxHeight);
             }
 
             var chatW = chat.Width > 0 && !double.IsNaN(chat.Width) ? chat.Width : 420;
@@ -1331,7 +1371,26 @@ public partial class MainWindow : Window
             return;
         var cfg = _settings.SystemTriggers;
         if (cfg is null || !cfg.Enabled)
+        {
+            _wasUserAway = false;
+            _lastSystemResourceSampleAt = DateTime.MinValue;
             return;
+        }
+
+        // 先跟踪离开/返回状态。旧逻辑在人离开时立即弹“回来啦”，气泡会在用户返回前消失。
+        var idle = SystemMonitorService.GetIdleSeconds();
+        var returnedFromIdle = SystemTriggerConfig.HasReturnedFromIdle(
+            _wasUserAway, idle, cfg.IdleTooLongSeconds);
+        if (!returnedFromIdle && cfg.IdleTooLongSeconds > 0 && idle >= cfg.IdleTooLongSeconds)
+        {
+            _wasUserAway = true;
+            return;
+        }
+        if (returnedFromIdle)
+            _wasUserAway = false;
+        else if (cfg.IdleTooLongSeconds <= 0)
+            _wasUserAway = false;
+
         // 节流：同类触发冷却内不再弹
         if (DateTime.Now - _lastSystemTriggerAt < TimeSpan.FromSeconds(cfg.CooldownSeconds > 0 ? cfg.CooldownSeconds : 600))
             return;
@@ -1339,7 +1398,19 @@ public partial class MainWindow : Window
         if (IsQuietNow())
             return;
 
-        var idle = SystemMonitorService.GetIdleSeconds();
+        if (returnedFromIdle)
+        {
+            _lastSystemTriggerAt = DateTime.Now;
+            StopWalking(recover: false);
+            PlayAction("stretch", exclusiveSeconds: 3);
+            ShowMessage("回来啦～先喝口水、活动一下，再继续也不迟。", 6);
+            return;
+        }
+
+        if (DateTime.Now - _lastSystemResourceSampleAt < TimeSpan.FromMinutes(2))
+            return;
+        _lastSystemResourceSampleAt = DateTime.Now;
+
         // CPU 采样约 0.5s，放后台避免卡 UI
         _ = Task.Run(() =>
         {
@@ -1574,6 +1645,8 @@ public partial class MainWindow : Window
         {
             _settings.AlwaysOnTop = _topmostMenuItem!.Checked;
             Topmost = _settings.AlwaysOnTop;
+            if (_chatWindow is { IsLoaded: true })
+                _chatWindow.Topmost = _settings.AlwaysOnTop;
             SaveSettings();
         });
         _startupMenuItem = AddCheckMenuItem(_trayMenu.Items, "开机自动启动", _settings.StartWithWindows, (_, _) =>
@@ -1796,6 +1869,24 @@ public partial class MainWindow : Window
                     }
                 });
             });
+            if (_hotkeys.FailedHotkeyIds.Count > 0)
+            {
+                var names = _hotkeys.FailedHotkeyIds.Select(id => id switch
+                {
+                    HotkeyService.IdToggleVisible => "Ctrl+Shift+S",
+                    HotkeyService.IdOpenChat => "Ctrl+Shift+C",
+                    HotkeyService.IdClickThrough => "Ctrl+Shift+P",
+                    HotkeyService.IdSettings => "Ctrl+Shift+,",
+                    HotkeyService.IdHelp => "Ctrl+Shift+H",
+                    _ => $"ID {id}",
+                });
+                _hotkeyWarning = "以下快捷键已被其他程序占用：" + string.Join("、", names)
+                                 + "。仍可使用系统托盘完成相同操作。";
+            }
+            else
+            {
+                _hotkeyWarning = null;
+            }
         }
         catch
         {
@@ -1816,7 +1907,8 @@ public partial class MainWindow : Window
             "Ctrl+Shift+,　个性化设置\n" +
             "Ctrl+Shift+H　显示本说明\n\n" +
             "鼠标：单击分区互动 · 双击比心 · 中键聊天 · 拖拽移动 · 右键菜单\n" +
-            "托盘：与上述功能一致，隐藏后请从托盘找回。",
+            "托盘：与上述功能一致，隐藏后请从托盘找回。"
+            + (string.IsNullOrWhiteSpace(_hotkeyWarning) ? "" : "\n\n注意：" + _hotkeyWarning),
             "快捷键说明",
             MessageBoxButton.OK,
             MessageBoxImage.Information);
@@ -1827,7 +1919,9 @@ public partial class MainWindow : Window
         StopWalking();
         var settingsWindow = new SettingsWindow(_settings)
         {
+            Owner = this,
             Topmost = Topmost,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
         };
         if (settingsWindow.ShowDialog() == true)
         {
