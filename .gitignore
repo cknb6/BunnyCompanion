@@ -30,3 +30,7 @@ __pycache__/
 # NuGet (local packages folder if any)
 packages/
 *.nupkg
+
+# 本地冗余文档（内容已并入 README，仓库不跟踪，本地保留）
+发布前检查清单.md
+隐私与私人使用说明.txt
