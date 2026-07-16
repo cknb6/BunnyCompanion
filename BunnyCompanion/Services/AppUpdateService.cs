@@ -35,6 +35,18 @@ public static class AppUpdateService
     /// <summary>最近一次「成功」的检查结果；限流时优先回退，避免二次全是 403。</summary>
     private static UpdateCheckResult? _lastSuccessResult;
 
+    /// <summary>测试用：HTTP 发送层可替换（仅 CheckAsync 主 API 请求计数/模拟 403）。</summary>
+    public static Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>>? HttpSendOverrideForTests { get; set; }
+
+    /// <summary>测试用：CheckAsync 实际发起的联网次数（含 override）。</summary>
+    public static int NetworkRequestCountForTests { get; private set; }
+
+    /// <summary>测试用：最近一次缓存时间戳（UTC）。</summary>
+    public static DateTime LastCheckUtcForTests
+    {
+        get { lock (Gate) return _lastCheckUtc; }
+    }
+
     public sealed record ReleaseAsset(string Name, string BrowserDownloadUrl, long Size);
 
     public sealed record UpdateCheckResult(
@@ -143,7 +155,7 @@ public static class AppUpdateService
         }
     }
 
-    /// <summary>测试用：清空进程内缓存。</summary>
+    /// <summary>测试用：清空进程内缓存与发送钩子计数。</summary>
     public static void ClearCacheForTests()
     {
         lock (Gate)
@@ -152,6 +164,9 @@ public static class AppUpdateService
             _lastSuccessResult = null;
             _lastCheckUtc = DateTime.MinValue;
         }
+
+        NetworkRequestCountForTests = 0;
+        HttpSendOverrideForTests = null;
     }
 
     /// <summary>测试/诊断：是否已有任意缓存结果。</summary>
@@ -159,6 +174,14 @@ public static class AppUpdateService
     {
         lock (Gate)
             return _lastResult is not null;
+    }
+
+    private static async Task<HttpResponseMessage> SendGitHubAsync(HttpRequestMessage req, CancellationToken ct)
+    {
+        NetworkRequestCountForTests++;
+        if (HttpSendOverrideForTests is not null)
+            return await HttpSendOverrideForTests(req, ct).ConfigureAwait(false);
+        return await Http.SendAsync(req, ct).ConfigureAwait(false);
     }
 
     /// <summary>当前运行中的本机版本（优先 FileVersion 含 CI 补丁号；辅以本机记录）。</summary>
@@ -288,7 +311,7 @@ public static class AppUpdateService
         try
         {
             using var req = new HttpRequestMessage(HttpMethod.Get, ReleasesApiLatest);
-            using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
+            using var resp = await SendGitHubAsync(req, ct).ConfigureAwait(false);
             var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
             {
@@ -439,19 +462,22 @@ public static class AppUpdateService
 
     private static UpdateCheckResult WithCacheNote(UpdateCheckResult lastOk, string rateLimitMsg)
     {
-        // 不更新 _lastCheckUtc 为「成功」，但刷新展示用结果，避免 force 路径反复打穿
+        // 限流回退：保留 _lastSuccessResult，但必须推进 _lastCheckUtc，
+        // 否则「成功时间已过 45 分钟 + 每 5 分钟定时」会每轮重新联网放大限流。
         var note =
             lastOk.Message +
             "\n（本次联网受限，已沿用刚才的检查结果。" +
             rateLimitMsg.Replace("\n", " ", StringComparison.Ordinal).Trim() + "）";
-        // 截断过长
         if (note.Length > 500)
             note = note[..500] + "…";
         var wrapped = lastOk with { Message = note };
         lock (Gate)
         {
-            // 保留成功缓存时间戳，拉长冷却；仅更新展示
             _lastResult = wrapped;
+            // 关键：任意已联网的限流回退都要刷新冷却时钟，避免 5 分钟定时反复打穿
+            _lastCheckUtc = DateTime.UtcNow;
+            if (lastOk.Success)
+                _lastSuccessResult = lastOk;
         }
 
         return wrapped;

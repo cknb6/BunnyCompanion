@@ -392,6 +392,57 @@ void Fail(string msg)
     else
         Ok("CheckAsync 缓存复用 OK");
 
+    // 限流 403 → WithCacheNote 推进 lastCheckUtc → 间隔内第二次不得再联网
+    AppUpdateService.ClearCacheForTests();
+    var okSeed = new AppUpdateService.UpdateCheckResult(
+        true, false, "已是最新（限流回退基线）", new Version(1, 5, 0, 42),
+        new Version(1, 5, 0, 42), "v1.5.0.42", null, null, null, null, null);
+    // lastCheck 设为 2 小时前：模拟「成功已超过 45 分钟」，若 force 会联网
+    AppUpdateService.SeedCacheForTests(okSeed, DateTime.UtcNow.AddHours(-2));
+
+    AppUpdateService.HttpSendOverrideForTests = (_, _) =>
+    {
+        var r = new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.Forbidden);
+        r.Content = new System.Net.Http.StringContent("{\"message\":\"API rate limit exceeded\"}");
+        r.Headers.TryAddWithoutValidation("Retry-After", "60");
+        return Task.FromResult(r);
+    };
+
+    var after403 = AppUpdateService.CheckAsync(minInterval: TimeSpan.FromMinutes(45), force: true)
+        .GetAwaiter().GetResult();
+    var n1 = AppUpdateService.NetworkRequestCountForTests;
+    if (n1 != 1)
+        Fail("force+403 应恰好联网 1 次，实际=" + n1);
+    if (!after403.Success)
+        Fail("有 lastSuccess 时 403 应回退成功结果，Success 应为 true");
+    if (after403.Message is null || !after403.Message.Contains("联网受限", StringComparison.Ordinal))
+        Fail("403 回退文案应含「联网受限」: " + after403.Message);
+    var lag = DateTime.UtcNow - AppUpdateService.LastCheckUtcForTests;
+    if (lag > TimeSpan.FromMinutes(2))
+        Fail("限流回退后 LastCheckUtc 应刷新为近期，lag=" + lag);
+
+    var afterCool = AppUpdateService.CheckAsync(minInterval: TimeSpan.FromMinutes(45), force: false)
+        .GetAwaiter().GetResult();
+    var n2 = AppUpdateService.NetworkRequestCountForTests;
+    if (n2 != 1)
+        Fail("限流回退后 45 分钟间隔内 force=false 不得二次联网，count=" + n2);
+    if (!afterCool.Success)
+        Fail("冷却内第二次应仍返回缓存成功");
+    else
+        Ok("限流后冷却内第二次 CheckAsync 不联网 OK");
+
+    // 再 force 一次仍会联网（证明钩子可计数），但间隔内 force=false 不增
+    _ = AppUpdateService.CheckAsync(minInterval: TimeSpan.FromMinutes(45), force: true)
+        .GetAwaiter().GetResult();
+    if (AppUpdateService.NetworkRequestCountForTests != 2)
+        Fail("再次 force 应再联网一次，count=" + AppUpdateService.NetworkRequestCountForTests);
+    _ = AppUpdateService.CheckAsync(minInterval: TimeSpan.FromMinutes(45), force: false)
+        .GetAwaiter().GetResult();
+    if (AppUpdateService.NetworkRequestCountForTests != 2)
+        Fail("force 后 force=false 仍不得额外联网，count=" + AppUpdateService.NetworkRequestCountForTests);
+    else
+        Ok("限流冷却：force 联网 / 非 force 缓存 计数 OK");
+
     AppUpdateService.ClearCacheForTests();
 }
 
