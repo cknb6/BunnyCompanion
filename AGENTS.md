@@ -50,33 +50,47 @@
 ```
 BunnyCompanion/
   BunnyCompanion/          # 主工程
-    MainWindow.*           # 桌宠、点拖、气泡、全屏
-    ChatWindow.*           # 微信风聊天、附件
+    MainWindow.*           # 桌宠、点拖、气泡、全屏、系统触发器定时器
+    ChatWindow.*           # 微信风聊天、附件、语音输入/TTS
     Engine/                # PetActionCatalog、MouseReactionCatalog
-    Services/              # Agent / 记忆 / 工具箱 / 设置 / 卸载
-    Models/PetSettings.cs
-  .github/workflows/       # CI 打包
-  tools/OfflineFallbackCheck/
+    Services/              # Agent / 记忆 / 工具箱 / 设置 / 卸载 / 监控 / 浏览器 / 技能 / 语音
+      AiAgentService.cs    # 四级降级 Agent 主链路
+      AiConfig.cs          # 接口与密钥（internal，勿扩散）
+      WindowsAgentToolkit.cs  # 30+ 本机工具定义与执行
+      CompanionMemoryService.cs / LocalAgentMdStore.cs  # 双层记忆
+      SystemMonitorService.cs / SystemTriggerConfig.cs  # 系统监控触发器
+      BrowserService.cs    # 网页抓取与浏览器
+      SkillPluginService.cs  # Markdown 技能插件
+      VoiceService.cs      # TTS（阶跃在线+SAPI离线）+ ASR（SAPI）
+    Models/PetSettings.cs  # 含 SystemTriggers/TtsEnabled/VoiceInputEnabled
+  Artwork/                 # 角色素材表 + Screenshots/（演示截图）
+  .github/workflows/       # CI 打包（build-windows.yml）
+  tools/GoalVerify/        # 纯逻辑自检（Exe）
+  tools/OfflineFallbackCheck/  # 离线词库自检（Exe）
+  tools/validate_project.py    # 结构校验（XML/精灵/动作引用）
   AGENTS.md                # 本文件
 ```
 
 本地数据：`%LocalAppData%\BunnyCompanion\`
-- `settings.json` — 设置与爱心
-- `companion_memory.json` — 结构化长期记忆（人物/偏好/备忘）
+- `settings.json` — 设置、爱心、互动次数、窗口位置、SystemTriggers/TtsEnabled/VoiceInputEnabled
+- `companion_memory.json` — 结构化长期记忆（人物/偏好/备忘/星座）
 - **`agent.md`** — 对话**自动摘要压缩**的 Markdown 长期记忆（滚动摘要 + 近期压缩 + 用户手写备注）；每轮聊天后更新，超长自动折叠
+- `skills/` — Markdown 技能插件目录（首次运行自动生成示例技能）
+- `Logs/crash.log` — 崩溃日志
 - 一键卸载会删整个配置目录
-- 托盘：「打开长期记忆 agent.md」
+- 托盘：「打开长期记忆 agent.md」「打开本地配置目录」
 
 ## Agent 工具链（必须正确）
 
 ```
 用户消息
-  → CompanionMemoryService.IngestUserUtterance（人物/偏好）
-  → 系统提示 = AgentSystemPrompt + 记忆块 +（可选）定位/天气预取
-  → 阶跃 step-3.7-flash + tools（主）
-  → OpenRouter 免费模型 + tools
-  → 阶跃纯文本
-  → ChatReplyService 本地中文
+  → CompanionMemoryService.IngestUserUtterance（人物/偏好/备忘/星座）
+  → 系统提示 = AgentSystemPrompt + 结构化记忆块 + agent.md 摘要块 +（可选）定位/天气/星座预取
+  → 阶跃 step-3.7-flash + tools（主，工具循环 MaxToolRounds=8）
+  → OpenRouter 免费模型 + tools（文本/视觉两组，按序尝试）
+  → 阶跃纯文本（无 tools）
+  → ChatReplyService 本地中文（断网最终兜底）
+  → 每轮结束 AppendTurnDigest 写 agent.md + SyncAgentMdFromMemory
 ```
 
 | 工具 | 用途 |
@@ -138,6 +152,11 @@ dotnet run --project tools/GoalVerify/GoalVerify.csproj -c Release
 # 结构校验（XML/XAML 事件/48 精灵/动作引用/可移植性）
 python3 tools/validate_project.py
 ```
+
+### 测试项目源码链接（新增源文件需同步加入 csproj）
+- `tools/GoalVerify/GoalVerify.csproj` 链接：CompanionMemoryService / CompanionRuntime / **SkillPluginService** / LocalAgentMdStore / WeatherReport / ZodiacService / DailyCompanion / MouseReactionCatalog / PetSettings / **SystemTriggerConfig**。
+- `tools/OfflineFallbackCheck/OfflineFallbackCheck.csproj` 链接：PetSettings / **SystemTriggerConfig** / ChatReplyService。
+- 凡 `PetSettings` 或 `CompanionRuntime` 引用的新类型（如 `SystemTriggerConfig`、`SkillPluginService`），必须把其定义文件加入测试项目，否则测试编译失败。**不要链接含 `System.Windows.Forms`/WPF 的文件**（如 `SystemMonitorService`/`VoiceService`），测试项目是 net9.0 非 Windows。
 
 ## 已知风险
 
