@@ -712,7 +712,7 @@ public partial class ChatWindow : Window
         {
             AppendTimeIfNeeded();
             var display = BuildUserDisplayText(text, attachments, includeDesktop);
-            AppendBubble(_settings.PartnerName, display, isPet: false, attachments: attachments);
+            AppendBubble("我", display, isPet: false, attachments: attachments);
             // 图片气泡额外展示缩略图
             foreach (var a in attachments.Where(x => x.Kind == ChatAttachmentKind.Image && x.ImageBytes is { Length: > 0 }))
                 AppendImageBubble(isPet: false, a.ImageBytes!, a.FileName);
@@ -942,7 +942,8 @@ public partial class ChatWindow : Window
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-        var avatar = CreateAvatar(isPet ? _settings.PetName : _settings.PartnerName, isPet);
+        // 头像：小申立绘 / 用户「我」可爱头像（不再显示单字「小」「宝」）
+        var avatar = CreateAvatar(isPet ? _settings.PetName : "我", isPet);
         var bubble = CreateTextBubble(text, isPet);
 
         if (isPet)
@@ -981,8 +982,8 @@ public partial class ChatWindow : Window
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-            // 占位对齐头像宽度
-            var spacer = new Border { Width = 40, Height = 1 };
+            // 占位对齐头像宽度（与圆形立绘头像一致）
+            var spacer = new Border { Width = 42, Height = 1 };
             var image = new System.Windows.Controls.Image
             {
                 Source = bitmap,
@@ -1055,24 +1056,63 @@ public partial class ChatWindow : Window
 
     private Border CreateAvatar(string name, bool isPet)
     {
-        var initial = string.IsNullOrWhiteSpace(name) ? "?" : name.Trim()[0].ToString();
+        // 圆形立绘头像（不再用「小」「宝」单字）
+        var img = new System.Windows.Controls.Image
+        {
+            Source = LoadChatAvatar(isPet),
+            Stretch = Stretch.UniformToFill,
+            Width = 42,
+            Height = 42,
+        };
+
+        var clip = new EllipseGeometry(new System.Windows.Point(21, 21), 21, 21);
+        // 必须在布局后更新，避免裁剪错位
+        img.Loaded += (_, _) =>
+        {
+            img.Clip = new EllipseGeometry(
+                new System.Windows.Point(img.ActualWidth / 2, img.ActualHeight / 2),
+                img.ActualWidth / 2,
+                img.ActualHeight / 2);
+        };
+        img.Clip = clip;
+
         return new Border
         {
-            Width = 40,
-            Height = 40,
-            CornerRadius = new CornerRadius(4),
-            Background = isPet ? ColorBrush("#07C160") : ColorBrush("#576B95"),
+            Width = 42,
+            Height = 42,
+            CornerRadius = new CornerRadius(21),
+            Background = isPet ? ColorBrush("#FFE8F0") : ColorBrush("#E8FFE8"),
+            BorderBrush = isPet ? ColorBrush("#FFB6C8") : ColorBrush("#07C160"),
+            BorderThickness = new Thickness(1.5),
             VerticalAlignment = VerticalAlignment.Top,
-            Child = new TextBlock
-            {
-                Text = initial,
-                Foreground = Brushes.White,
-                FontSize = 16,
-                FontWeight = FontWeights.SemiBold,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-            },
+            ClipToBounds = true,
+            Child = img,
+            ToolTip = isPet
+                ? (string.IsNullOrWhiteSpace(name) ? "小申" : name)
+                : "我",
         };
+    }
+
+    private static readonly Dictionary<bool, BitmapImage> AvatarCache = new();
+
+    private static BitmapImage LoadChatAvatar(bool isPet)
+    {
+        if (AvatarCache.TryGetValue(isPet, out var cached))
+            return cached;
+
+        var file = isPet ? "pet_avatar.png" : "user_avatar.png";
+        var uri = new Uri(
+            $"pack://application:,,,/BunnyCompanion;component/Assets/Avatars/{file}",
+            UriKind.Absolute);
+        var bmp = new BitmapImage();
+        bmp.BeginInit();
+        bmp.UriSource = uri;
+        bmp.CacheOption = BitmapCacheOption.OnLoad;
+        bmp.DecodePixelWidth = 128;
+        bmp.EndInit();
+        bmp.Freeze();
+        AvatarCache[isPet] = bmp;
+        return bmp;
     }
 
     private Border CreateTextBubble(string text, bool isPet)

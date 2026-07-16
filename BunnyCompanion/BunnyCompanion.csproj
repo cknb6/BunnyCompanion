@@ -33,6 +33,7 @@
 
   <ItemGroup>
     <Resource Include="Assets\Sprites\*.png" />
+    <Resource Include="Assets\Avatars\*.png" />
     <Resource Include="Assets\BunnyCompanion.ico" />
   </ItemGroup>
 </Project>
