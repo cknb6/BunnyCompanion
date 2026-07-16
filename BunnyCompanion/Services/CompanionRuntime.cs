@@ -7,6 +7,7 @@ public static class CompanionRuntime
 {
     private static CompanionMemoryService? _memory;
     private static LocalAgentMdStore? _agentMd;
+    private static SkillPluginService? _skills;
 
     public static CompanionMemoryService Memory
     {
@@ -18,6 +19,12 @@ public static class CompanionRuntime
     {
         get => _agentMd ??= new LocalAgentMdStore();
         set => _agentMd = value;
+    }
+
+    public static SkillPluginService Skills
+    {
+        get => _skills ??= new SkillPluginService();
+        set => _skills = value;
     }
 
     /// <summary>结构化记忆落盘后同步刷新 agent.md 固定区。</summary>

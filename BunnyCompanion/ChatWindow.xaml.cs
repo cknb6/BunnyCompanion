@@ -382,6 +382,8 @@ public partial class ChatWindow : Window
             if (result.UsedDesktopImage) status = "已看桌面 · " + status;
             if (result.ToolTrace is { Count: > 0 }) status += " · 已调用本机工具";
             StatusText.Text = status;
+            // TTS 朗读回复（需用户在设置开启，且非安静时段）
+            TrySpeakReply(result.Text);
             _onPetReply(result);
         }
         catch (OperationCanceledException)
@@ -795,5 +797,83 @@ public partial class ChatWindow : Window
         var brush = (SolidColorBrush)new BrushConverter().ConvertFromString(hex)!;
         brush.Freeze();
         return brush;
+    }
+
+    // ---------- 语音输入 / TTS 朗读 ----------
+
+    private void VoiceButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_busy)
+            return;
+        if (!_settings.VoiceInputEnabled)
+        {
+            AppendSystemTip("语音输入未开启，可在设置中打开。");
+            return;
+        }
+        if (!VoiceService.IsTtsAvailable && !IsSpeechLikelyAvailable())
+        {
+            AppendSystemTip("未检测到 Windows 语音识别，请确认系统已启用语音功能。");
+            return;
+        }
+
+        // 在后台线程识别，避免阻塞 UI
+        var oldContent = VoiceButton.Content;
+        VoiceButton.Content = "…";
+        VoiceButton.IsEnabled = false;
+        StatusText.Text = "正在听…说一句话吧";
+        _ = Task.Run(() =>
+        {
+            var text = VoiceService.RecognizeOnce(7000);
+            Dispatcher.Invoke(() =>
+            {
+                VoiceButton.Content = oldContent;
+                VoiceButton.IsEnabled = true;
+                if (string.IsNullOrWhiteSpace(text))
+                {
+                    StatusText.Text = "没听清，再说一次或直接打字～";
+                    return;
+                }
+                InputBox.Text = text;
+                InputBox.Focus();
+                InputBox.CaretIndex = text.Length;
+                StatusText.Text = "已识别，可发送";
+            });
+        });
+    }
+
+    private static bool IsSpeechLikelyAvailable() =>
+        OperatingSystem.IsWindows();
+
+    /// <summary>开启 TTS 且非安静时段时，朗读回复（截断到合理长度，避免长文念太久）。</summary>
+    private void TrySpeakReply(string text)
+    {
+        try
+        {
+            if (!_settings.TtsEnabled || string.IsNullOrWhiteSpace(text))
+                return;
+            // 安静时段不朗读
+            if (IsQuietNow())
+                return;
+            // 长文截断：最多念前 300 字，避免念太久
+            var spoken = text.Length > 300 ? text[..300] : text;
+            // 去掉 markdown 符号，让朗读更自然
+            spoken = System.Text.RegularExpressions.Regex.Replace(spoken, @"[#*`>\-]", " ");
+            VoiceService.Speak(spoken);
+        }
+        catch
+        {
+            // TTS 失败不阻断
+        }
+    }
+
+    private bool IsQuietNow()
+    {
+        if (_settings.QuietMode)
+            return true;
+        if (!TimeOnly.TryParse(_settings.QuietStart, out var start)
+            || !TimeOnly.TryParse(_settings.QuietEnd, out var end))
+            return false;
+        var now = TimeOnly.FromDateTime(DateTime.Now);
+        return start <= end ? now >= start && now < end : now >= start || now < end;
     }
 }

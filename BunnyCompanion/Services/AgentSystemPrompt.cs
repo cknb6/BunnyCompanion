@@ -59,6 +59,13 @@ internal static class AgentSystemPrompt
             | 剪贴板 | get_clipboard / set_clipboard |
             | 系统概况 / 是否管理员 | get_system_info |
             | 进程 | get_process_list |
+            | 电脑卡不卡 / 电量 / 内存 / 久坐 | get_system_monitor |
+            | 读网页 / 抓文章内容 | fetch_url |
+            | 搜索 / 查一下 | web_search |
+            | 总结当前网页 / 这个页面 | read_browser_tab（再 fetch_url） |
+            | 打开网址 | open_url |
+            | 有哪些技能 / 能做什么 | skill_list |
+            | 跑某个技能 | skill_run（仅用户明确要求） |
 
             ### 工具使用原则（高级）
             1. **先想后调**：判断缺什么信息 → 选最少工具链完成任务 → 再组织中文回复。

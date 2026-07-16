@@ -1,3 +1,5 @@
+using BunnyCompanion.Services;
+
 namespace BunnyCompanion.Models;
 
 public sealed class PetSettings
@@ -9,6 +11,10 @@ public sealed class PetSettings
     public bool AutoWalk { get; set; } = true;
     public bool StartWithWindows { get; set; } = true;
     public bool SoundEnabled { get; set; } = true;
+    /// <summary>是否用语音朗读 Agent 回复（TTS，需 Windows SAPI）。</summary>
+    public bool TtsEnabled { get; set; }
+    /// <summary>是否启用语音输入按钮（语音识别，需 Windows SAPI）。</summary>
+    public bool VoiceInputEnabled { get; set; } = true;
     public bool ShowSpeechBubbles { get; set; } = true;
     public bool QuietMode { get; set; }
     public bool HideForFullscreen { get; set; } = true;
@@ -26,6 +32,8 @@ public sealed class PetSettings
     public double? LastTop { get; set; }
     public bool HasCompletedFirstRun { get; set; }
     public List<string> LoveMessages { get; set; } = DefaultMessages();
+    /// <summary>系统监控触发器配置（CPU/内存/电池/久坐提醒阈值）。</summary>
+    public SystemTriggerConfig SystemTriggers { get; set; } = new();
 
     public static List<string> DefaultMessages() =>
     [

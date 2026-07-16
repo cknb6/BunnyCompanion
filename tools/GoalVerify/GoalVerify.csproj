@@ -9,11 +9,13 @@
   <ItemGroup>
     <Compile Include="..\..\BunnyCompanion\Services\CompanionMemoryService.cs" Link="CompanionMemoryService.cs" />
     <Compile Include="..\..\BunnyCompanion\Services\CompanionRuntime.cs" Link="CompanionRuntime.cs" />
+    <Compile Include="..\..\BunnyCompanion\Services\SkillPluginService.cs" Link="SkillPluginService.cs" />
     <Compile Include="..\..\BunnyCompanion\Services\LocalAgentMdStore.cs" Link="LocalAgentMdStore.cs" />
     <Compile Include="..\..\BunnyCompanion\Services\WeatherReport.cs" Link="WeatherReport.cs" />
     <Compile Include="..\..\BunnyCompanion\Services\ZodiacService.cs" Link="ZodiacService.cs" />
     <Compile Include="..\..\BunnyCompanion\Services\DailyCompanion.cs" Link="DailyCompanion.cs" />
     <Compile Include="..\..\BunnyCompanion\Engine\MouseReactionCatalog.cs" Link="MouseReactionCatalog.cs" />
     <Compile Include="..\..\BunnyCompanion\Models\PetSettings.cs" Link="PetSettings.cs" />
+    <Compile Include="..\..\BunnyCompanion\Services\SystemTriggerConfig.cs" Link="SystemTriggerConfig.cs" />
   </ItemGroup>
 </Project>

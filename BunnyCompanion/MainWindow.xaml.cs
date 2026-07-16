@@ -39,6 +39,8 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _reminderTimer = new() { Interval = TimeSpan.FromSeconds(30) };
     private readonly DispatcherTimer _fullscreenTimer = new() { Interval = TimeSpan.FromSeconds(2) };
     private readonly DispatcherTimer _focusTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    /// <summary>系统监控触发器：CPU/内存/电池/久坐提醒。2 分钟采样一次，避免频繁取样。</summary>
+    private readonly DispatcherTimer _systemTriggerTimer = new() { Interval = TimeSpan.FromSeconds(120) };
     /// <summary>定期自愈：穿透残留 / 拖拽卡死 / 透明度动画卡住导致点不上。</summary>
     private readonly DispatcherTimer _inputHealTimer = new() { Interval = TimeSpan.FromSeconds(1.2) };
 
@@ -92,6 +94,8 @@ public partial class MainWindow : Window
     private DateTime _lastPersonBubbleAt = DateTime.MinValue;
     private DateOnly? _lastWeatherBubbleDay;
     private DateTime _lastMemoCheck = DateTime.MinValue;
+    /// <summary>系统触发器节流：记录上次触发时间，避免同类提醒刷屏。</summary>
+    private DateTime _lastSystemTriggerAt = DateTime.MinValue;
 
     private bool IsFocusActive => _focusEnd is { } end && end > DateTime.Now;
     private bool IsExclusiveBusy => DateTime.Now < _exclusiveUntil || _isDragging || _introPlaying;
@@ -113,6 +117,7 @@ public partial class MainWindow : Window
         _fullscreenTimer.Tick += FullscreenTimer_Tick;
         _focusTimer.Tick += FocusTimer_Tick;
         _inputHealTimer.Tick += InputHealTimer_Tick;
+        _systemTriggerTimer.Tick += SystemTriggerTimer_Tick;
     }
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -663,6 +668,8 @@ public partial class MainWindow : Window
             _behaviorTimer.Start();
         if (!_reminderTimer.IsEnabled)
             _reminderTimer.Start();
+        if (!_systemTriggerTimer.IsEnabled && IsPetVisibleActive)
+            _systemTriggerTimer.Start();
     }
 
     private void StopWalking(bool recover = true)
@@ -1317,6 +1324,40 @@ public partial class MainWindow : Window
         CheckSpecialDate(force: false);
     }
 
+    /// <summary>系统监控触发器：CPU/内存/电池/久坐 → 桌宠动作与气泡。CPU 采样耗时，放后台线程。</summary>
+    private void SystemTriggerTimer_Tick(object? sender, EventArgs e)
+    {
+        if (_isExiting || !IsPetVisibleActive || _isDragging)
+            return;
+        var cfg = _settings.SystemTriggers;
+        if (cfg is null || !cfg.Enabled)
+            return;
+        // 节流：同类触发冷却内不再弹
+        if (DateTime.Now - _lastSystemTriggerAt < TimeSpan.FromSeconds(cfg.CooldownSeconds > 0 ? cfg.CooldownSeconds : 600))
+            return;
+        // 安静时段不打断
+        if (IsQuietNow())
+            return;
+
+        var idle = SystemMonitorService.GetIdleSeconds();
+        // CPU 采样约 0.5s，放后台避免卡 UI
+        _ = Task.Run(() =>
+        {
+            var result = SystemMonitorService.EvaluateTriggers(cfg, idle);
+            if (result is null)
+                return;
+            Dispatcher.Invoke(() =>
+            {
+                if (_isExiting || !IsPetVisibleActive || IsQuietNow())
+                    return;
+                _lastSystemTriggerAt = DateTime.Now;
+                StopWalking(recover: false);
+                PlayAction(result.ActionKey, exclusiveSeconds: 3);
+                ShowMessage(result.Message, 6);
+            });
+        });
+    }
+
     private void TryMorningWeatherBubble()
     {
         var hour = DateTime.Now.Hour;
@@ -1951,6 +1992,7 @@ public partial class MainWindow : Window
         _fullscreenTimer.Stop();
         _focusTimer.Stop();
         _inputHealTimer.Stop();
+        _systemTriggerTimer.Stop();
         if (_isDragging)
             EndDrag(interrupted: true);
         try

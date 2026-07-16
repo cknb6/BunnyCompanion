@@ -195,11 +195,14 @@
             <RowDefinition Height="Auto" />
           </Grid.RowDefinitions>
 
-          <!-- 工具行：+ 附件 / 看桌面勾选 -->
+          <!-- 工具行：+ 附件 / 语音 / 看桌面勾选 -->
           <DockPanel Grid.Row="0" Margin="0,0,0,6">
             <Button x:Name="AttachButton" DockPanel.Dock="Left" Content="＋" FontSize="20"
                     Style="{StaticResource WxIconButton}" ToolTip="上传图片 / 文件"
                     Click="AttachButton_Click" />
+            <Button x:Name="VoiceButton" DockPanel.Dock="Left" Content="🎤" FontSize="16"
+                    Style="{StaticResource WxIconButton}" ToolTip="语音输入（需 Windows 语音识别）"
+                    Click="VoiceButton_Click" Margin="2,0,0,0" />
             <CheckBox x:Name="DesktopCheck" Content="附带桌面截图" IsChecked="False"
                       Foreground="#576B95" FontSize="12" VerticalAlignment="Center"
                       Margin="6,0,0,0" />

@@ -9,6 +9,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\..\BunnyCompanion\Models\PetSettings.cs" Link="PetSettings.cs" />
+    <Compile Include="..\..\BunnyCompanion\Services\SystemTriggerConfig.cs" Link="SystemTriggerConfig.cs" />
     <Compile Include="..\..\BunnyCompanion\Services\ChatReplyService.cs" Link="ChatReplyService.cs" />
   </ItemGroup>
 </Project>
