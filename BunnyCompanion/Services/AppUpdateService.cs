@@ -310,6 +310,7 @@ public static class AppUpdateService
 
         try
         {
+            DebugLogService.Log("update", $"CheckAsync force={force} local={local}");
             using var req = new HttpRequestMessage(HttpMethod.Get, ReleasesApiLatest);
             using var resp = await SendGitHubAsync(req, ct).ConfigureAwait(false);
             var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
@@ -320,8 +321,10 @@ public static class AppUpdateService
                 if (resp.Headers.TryGetValues("Retry-After", out var vals))
                     retryAfter = vals.FirstOrDefault();
                 var errMsg = FormatGitHubHttpError(code, body.Length > 400 ? body[..400] : body, retryAfter);
+                DebugLogService.Log("update", $"CheckAsync HTTP {code} retryAfter={retryAfter ?? "-"} msg={errMsg[..Math.Min(errMsg.Length, 200)]}");
                 return ResolveHttpFailure(local, errMsg, code, lastOk);
             }
+            DebugLogService.Log("update", $"CheckAsync HTTP 200 bodyLen={body.Length}");
 
             using var doc = JsonDocument.Parse(body);
             var root = doc.RootElement;
@@ -430,6 +433,7 @@ public static class AppUpdateService
         }
         catch (Exception ex)
         {
+            DebugLogService.LogError("update", "CheckAsync 异常（多为网络不通/DNS/超时）", ex);
             var msg = IsRateLimitMessage(ex.Message)
                 ? ex.Message
                 : "检查更新失败：" + ex.Message;
@@ -518,8 +522,10 @@ public static class AppUpdateService
 
         try
         {
+            DebugLogService.Log("update", $"Apply 开始：tag={check.TagName} target={check.TargetFileName} exe={currentExe}");
             progress?.Report("正在下载更新包…");
             await DownloadFileAsync(check.ExeDownloadUrl!, tempExe, progress, ct).ConfigureAwait(false);
+            DebugLogService.Log("update", $"下载完成：{new FileInfo(tempExe).Length} bytes");
 
             progress?.Report("正在校验 SHA256…");
             var actual = await ComputeSha256HexAsync(tempExe, ct).ConfigureAwait(false);
@@ -568,8 +574,9 @@ public static class AppUpdateService
                     WindowStyle = ProcessWindowStyle.Hidden,
                 });
             }
-            catch
+            catch (Exception ex)
             {
+                DebugLogService.LogError("update", "启动 bat 覆盖脚本失败", ex);
                 helper = null;
             }
 
@@ -591,8 +598,9 @@ public static class AppUpdateService
                         },
                     });
                 }
-                catch
+                catch (Exception ex)
                 {
+                    DebugLogService.LogError("update", "启动 ps1 覆盖脚本也失败", ex);
                     helper = null;
                 }
             }
@@ -618,6 +626,7 @@ public static class AppUpdateService
         }
         catch (Exception ex)
         {
+            DebugLogService.LogError("update", "Apply 失败", ex);
             try { if (File.Exists(tempExe)) File.Delete(tempExe); } catch { /* ignore */ }
             return new ApplyResult(false, "更新失败：" + ex.Message);
         }

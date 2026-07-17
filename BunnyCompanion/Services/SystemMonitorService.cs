@@ -23,6 +23,61 @@ public static class SystemMonitorService
     [DllImport("user32.dll")]
     private static extern bool GetLastInputInfo(ref LastInputInfo plii);
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+    /// <summary>
+    /// 取前台窗口进程名+标题+闲置时长，推断"用户当前在干嘛"。
+    /// 毫秒级本地 API，供每轮系统提示注入，让 Agent 跨会话知道用户当前活动。
+    /// </summary>
+    public static string GetCurrentActivity()
+    {
+        try
+        {
+            var fg = GetForegroundWindow();
+            if (fg == IntPtr.Zero)
+                return "未取到前台窗口";
+
+            GetWindowThreadProcessId(fg, out var pid);
+            string procName = "未知", title = "";
+            try
+            {
+                using var p = Process.GetProcessById((int)pid);
+                procName = p.ProcessName ?? "未知";
+                title = p.MainWindowTitle ?? "";
+            }
+            catch { /* 进程已退出 */ }
+
+            if (string.IsNullOrWhiteSpace(title))
+            {
+                var sb = new StringBuilder(256);
+                if (GetWindowText(fg, sb, 256) > 0)
+                    title = sb.ToString();
+            }
+
+            var idle = GetIdleSeconds();
+            var sbResult = new StringBuilder();
+            sbResult.Append($"前台程序: {procName}");
+            if (!string.IsNullOrWhiteSpace(title))
+                sbResult.Append($"（{title.Trim()}）");
+            if (idle > 300)
+                sbResult.Append(" · 已离开 ").Append((int)idle / 60).Append(" 分钟");
+            else if (idle > 60)
+                sbResult.Append(" · 闲置 ").Append((int)idle / 60).Append(" 分钟");
+            return sbResult.ToString();
+        }
+        catch (Exception ex)
+        {
+            return "取当前活动失败: " + ex.Message;
+        }
+    }
+
     /// <summary>用户最后一次输入距今的秒数（键盘/鼠标无操作时长）。</summary>
     public static double GetIdleSeconds()
     {

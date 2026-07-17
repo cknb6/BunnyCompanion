@@ -256,64 +256,64 @@ public static class BrowserService
 
     /// <summary>
     /// 抓取搜索结果摘要（标题+链接+摘要），供办公 Agent 直接阅读。
-    /// 默认走 DuckDuckGo Lite（免 Key、HTML 结构稳定）；engine=bing/baidu/google 时走对应引擎 DOM 解析。
-    /// 任一引擎解析为空时自动回退到 DuckDuckGo Lite，保证可用性。
+    /// 默认 Bing 优先（国内可达），失败或为空时依次回退 Baidu、DuckDuckGo Lite。
+    /// 每次引擎尝试写入调试日志，方便排查被反爬/被墙。
     /// </summary>
     public static async Task<string> SearchResultsAsync(string query, string engine, int max, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(query))
             return "错误：搜索词为空";
         max = Math.Clamp(max, 1, 10);
-        engine = string.IsNullOrWhiteSpace(engine) ? "duckduckgo" : engine.Trim().ToLowerInvariant();
+        engine = string.IsNullOrWhiteSpace(engine) ? "bing" : engine.Trim().ToLowerInvariant();
         var q = Uri.EscapeDataString(query.Trim());
 
-        List<(string Title, string Link, string Snip)> items;
-        var usedUrl = $"https://lite.duckduckgo.com/lite/?q={q}&kl=cn-zh";
-        var usedEngine = "duckduckgo";
-
-        // DuckDuckGo Lite 为主：免 Key、结构稳定（表格 tr.result_form 一直没变）
-        try
+        // 引擎尝试顺序：用户指定的排最前，其余按国内可达性排序作回退
+        var order = new List<string> { engine };
+        foreach (var e in new[] { "bing", "baidu", "duckduckgo" })
         {
-            usedUrl = $"https://lite.duckduckgo.com/lite/?q={q}&kl=cn-zh";
-            usedEngine = "duckduckgo";
-            var html = await FetchHtmlAsync(usedUrl, ct).ConfigureAwait(false);
-            items = ParseDuckDuckGoLite(html, max);
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch
-        {
-            items = new List<(string, string, string)>();
+            if (!order.Contains(e))
+                order.Add(e);
         }
 
-        // DuckDuckGo 失败或为空，且用户指定了别的引擎，再试指定引擎
-        if (items.Count == 0 && engine != "duckduckgo")
+        List<(string Title, string Link, string Snip)> items = new();
+        var usedEngine = engine;
+
+        foreach (var e in order)
         {
-            usedUrl = engine switch
+            ct.ThrowIfCancellationRequested();
+            var url = e switch
             {
                 "baidu" => $"https://www.baidu.com/s?wd={q}",
+                "duckduckgo" => $"https://lite.duckduckgo.com/lite/?q={q}&kl=cn-zh",
                 "google" => $"https://www.google.com/search?q={q}&hl=zh-CN",
-                _ => $"https://www.bing.com/search?q={q}&setlang=zh-CN",
+                _ => $"https://www.bing.com/search?q={q}&setlang=zh-CN&mkt=zh-CN",
             };
-            usedEngine = engine;
             try
             {
-                var html = await FetchHtmlAsync(usedUrl, ct).ConfigureAwait(false);
-                items = engine switch
+                // 单引擎限时 10 秒：被墙的域名快速失败，立刻换下一个
+                using var perEngineCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                perEngineCts.CancelAfter(TimeSpan.FromSeconds(10));
+                var html = await FetchHtmlAsync(url, perEngineCts.Token).ConfigureAwait(false);
+                items = e switch
                 {
                     "baidu" => ParseBaiduResults(html, max),
+                    "duckduckgo" => ParseDuckDuckGoLite(html, max),
                     _ => ParseBingResults(html, max),
                 };
+                DebugLogService.Log("search", $"engine={e} query={query} results={items.Count} htmlLen={html.Length}");
+                if (items.Count > 0)
+                {
+                    usedEngine = e;
+                    break;
+                }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 throw;
             }
-            catch
+            catch (Exception ex)
             {
-                items = new List<(string, string, string)>();
+                DebugLogService.LogError("search", $"engine={e} query={query}", ex);
             }
         }
 

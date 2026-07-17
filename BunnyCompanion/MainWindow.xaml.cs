@@ -1961,6 +1961,7 @@ public partial class MainWindow : Window
         AddMenuItem(_trayMenu.Items, "回到屏幕右下角", (_, _) => ResetPosition());
         AddMenuItem(_trayMenu.Items, "打开本地配置目录", (_, _) => OpenConfigDirectory());
         AddMenuItem(_trayMenu.Items, "打开长期记忆 agent.md", (_, _) => OpenAgentMd());
+        AddMenuItem(_trayMenu.Items, "打开调试日志", (_, _) => OpenDebugLog());
         AddMenuItem(_trayMenu.Items, "检查更新…", (_, _) =>
         {
             _ = Dispatcher.InvokeAsync(async () =>
@@ -2255,6 +2256,27 @@ public partial class MainWindow : Window
         {
             MessageBox.Show(
                 $"无法打开 agent.md，请手动访问：\n{_agent.AgentMd.FilePath}",
+                "小申陪伴", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+    }
+
+    private void OpenDebugLog()
+    {
+        try
+        {
+            if (!File.Exists(DebugLogService.LogPath))
+                DebugLogService.Log("app", "用户从托盘打开调试日志");
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = DebugLogService.LogPath,
+                UseShellExecute = true,
+            });
+            ShowMessage("调试日志已打开，遇到问题可以把这个文件发给开发者～", 3.5);
+        }
+        catch
+        {
+            MessageBox.Show(
+                $"无法打开调试日志，请手动访问：\n{DebugLogService.LogPath}",
                 "小申陪伴", MessageBoxButton.OK, MessageBoxImage.Information);
         }
     }

@@ -46,6 +46,10 @@ public sealed class AiAgentService
     private readonly CompanionMemoryService _memory;
     private readonly LocalAgentMdStore _agentMd;
 
+    /// <summary>进程级定位缓存：首次对话静默取一次，之后每轮复用，避免每轮联网。</summary>
+    private static string? _cachedLocationBrief;
+    private static DateTime _cachedLocationAtUtc = DateTime.MinValue;
+
     private sealed record ChatTurn(string Role, string Text);
     private sealed record ImageInput(byte[] Bytes, string MimeType);
 
@@ -200,6 +204,16 @@ public sealed class AiAgentService
             var memoryBlock = _memory.FormatForSystemPrompt();
             if (!string.IsNullOrWhiteSpace(memoryBlock))
                 systemPrompt += "\n\n" + memoryBlock;
+
+            // 当前情境：位置（进程级缓存）+ 前台活动（实时），让 Agent 每轮都知道"用户在哪、在干嘛"
+            try
+            {
+                var contextBlock = await BuildCurrentContextAsync(cancellationToken).ConfigureAwait(false);
+                if (!string.IsNullOrWhiteSpace(contextBlock))
+                    systemPrompt += "\n\n" + contextBlock;
+            }
+            catch { /* 情境注入失败不阻断对话 */ }
+
             // 本地 agent.md：滚动摘要 + 近期压缩对话（长期记忆主载体之一）
             try
             {
@@ -1145,6 +1159,71 @@ public sealed class AiAgentService
         }
 
         return messages;
+    }
+
+    /// <summary>
+    /// 组装"当前情境"块：用户大概位置（进程级缓存，6 小时刷新）+ 当前前台活动（实时）。
+    /// 每轮注入系统提示，让 Agent 跨会话稳定知道"用户是谁、在哪、在干嘛"。
+    /// 位置只在首次或过期时联网，避免每轮调用公网 IP 库。
+    /// </summary>
+    private static async Task<string?> BuildCurrentContextAsync(CancellationToken ct)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("# 当前情境（每轮自动注入，请自然结合，勿生硬复读）");
+
+        // 位置：进程级缓存，6 小时刷新
+        var nowUtc = DateTime.UtcNow;
+        if (string.IsNullOrWhiteSpace(_cachedLocationBrief)
+            || nowUtc - _cachedLocationAtUtc > TimeSpan.FromHours(6))
+        {
+            try
+            {
+                var loc = await WindowsAgentToolkit.ExecuteAsync("get_location", new JsonObject(), ct)
+                    .ConfigureAwait(false);
+                _cachedLocationBrief = ExtractLocationBrief(loc);
+                _cachedLocationAtUtc = nowUtc;
+                DebugLogService.Log("context", $"定位刷新 brief={_cachedLocationBrief}");
+            }
+            catch (Exception ex)
+            {
+                DebugLogService.LogError("context", "定位刷新失败（用旧缓存或省略）", ex);
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(_cachedLocationBrief))
+            sb.AppendLine($"- 用户大概位置：{_cachedLocationBrief}");
+
+        // 当前活动：前台窗口（毫秒级本地 API，每轮取）
+        try
+        {
+            var activity = SystemMonitorService.GetCurrentActivity();
+            if (!string.IsNullOrWhiteSpace(activity))
+                sb.AppendLine($"- 用户当前活动：{activity}");
+        }
+        catch (Exception ex)
+        {
+            DebugLogService.LogError("context", "取当前活动失败", ex);
+        }
+
+        var text = sb.ToString().Trim();
+        return text.Length > 80 ? text : null;
+    }
+
+    /// <summary>从 get_location 完整输出里提取一句话位置摘要（国家+省+市）。</summary>
+    private static string ExtractLocationBrief(string locFull)
+    {
+        if (string.IsNullOrWhiteSpace(locFull))
+            return "";
+        string? country = null, province = null, city = null;
+        foreach (var line in locFull.Split('\n'))
+        {
+            var t = line.Trim();
+            if (t.StartsWith("国家:", StringComparison.Ordinal)) country = t["国家:".Length..].Trim();
+            else if (t.StartsWith("省/州:", StringComparison.Ordinal)) province = t["省/州:".Length..].Trim();
+            else if (t.StartsWith("城市:", StringComparison.Ordinal)) city = t["城市:".Length..].Trim();
+        }
+        var parts = new[] { country, province, city }.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+        return parts.Count > 0 ? string.Join(" · ", parts) : "";
     }
 
     /// <summary>

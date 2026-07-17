@@ -19,6 +19,7 @@
     <Compile Include="..\..\BunnyCompanion\Engine\MouseReactionCatalog.cs" Link="MouseReactionCatalog.cs" />
     <Compile Include="..\..\BunnyCompanion\Engine\PetFacing.cs" Link="PetFacing.cs" />
     <Compile Include="..\..\BunnyCompanion\Services\AppUpdateService.cs" Link="AppUpdateService.cs" />
+    <Compile Include="..\..\BunnyCompanion\Services\DebugLogService.cs" Link="DebugLogService.cs" />
     <Compile Include="..\..\BunnyCompanion\Models\PetSettings.cs" Link="PetSettings.cs" />
     <Compile Include="..\..\BunnyCompanion\Services\SystemTriggerConfig.cs" Link="SystemTriggerConfig.cs" />
     <Compile Include="..\..\BunnyCompanion\Services\OfficePlanStore.cs" Link="OfficePlanStore.cs" />

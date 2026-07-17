@@ -296,9 +296,10 @@ public static class WindowsAgentToolkit
     public static async Task<string> ExecuteAsync(string name, JsonObject? args, CancellationToken ct)
     {
         args ??= new JsonObject();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            return name switch
+            var result = name switch
             {
                 "get_system_info" => GetSystemInfo(),
                 "get_location" => await GetLocationAsync(ct).ConfigureAwait(false),
@@ -367,13 +368,17 @@ public static class WindowsAgentToolkit
                     .ConfigureAwait(false),
                 _ => $"错误：未知工具 {name}",
             };
+            DebugLogService.Log("tool", $"{name} ok {sw.ElapsedMilliseconds}ms resultLen={result?.Length ?? 0}");
+            return result ?? "";
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            DebugLogService.Log("tool", $"{name} 已取消 {sw.ElapsedMilliseconds}ms");
             throw;
         }
         catch (Exception ex)
         {
+            DebugLogService.LogError("tool", $"{name} 失败 {sw.ElapsedMilliseconds}ms", ex);
             return $"错误：{ex.GetType().Name}: {ex.Message}";
         }
     }
