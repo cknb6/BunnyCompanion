@@ -5,7 +5,7 @@
         Width="420" Height="680"
         MinWidth="320" MinHeight="420"
         WindowStartupLocation="Manual"
-        Background="#EDEDED"
+        Background="#F3F5F8"
         FontFamily="Microsoft YaHei UI"
         ShowInTaskbar="True"
         Topmost="False"
@@ -20,7 +20,79 @@
         KeyDown="Window_KeyDown"
         Loaded="Window_Loaded">
   <Window.Resources>
-    <!-- 微信绿发送按钮 -->
+    <!-- ============ 全局美化：细圆角滚动条（垂直/水平两态） ============ -->
+    <Style x:Key="SoftScrollThumb" TargetType="Thumb">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Thumb">
+            <Border x:Name="Bd" Background="#C9CFD9" CornerRadius="4" Margin="1"
+                    SnapsToDevicePixels="True" />
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#A7B0BE" />
+              </Trigger>
+              <Trigger Property="IsDragging" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#8F99AB" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style TargetType="ScrollBar">
+      <Setter Property="SnapsToDevicePixels" Value="True" />
+      <Setter Property="OverridesDefaultStyle" Value="True" />
+      <Setter Property="Background" Value="Transparent" />
+      <Style.Triggers>
+        <Trigger Property="Orientation" Value="Vertical">
+          <Setter Property="Width" Value="8" />
+          <Setter Property="Template">
+            <Setter.Value>
+              <ControlTemplate TargetType="ScrollBar">
+                <Grid Background="Transparent">
+                  <Track x:Name="PART_Track" IsDirectionReversed="True">
+                    <Track.DecreaseRepeatButton>
+                      <RepeatButton Command="ScrollBar.PageUpCommand" Opacity="0" Focusable="False" />
+                    </Track.DecreaseRepeatButton>
+                    <Track.Thumb>
+                      <Thumb Style="{StaticResource SoftScrollThumb}" />
+                    </Track.Thumb>
+                    <Track.IncreaseRepeatButton>
+                      <RepeatButton Command="ScrollBar.PageDownCommand" Opacity="0" Focusable="False" />
+                    </Track.IncreaseRepeatButton>
+                  </Track>
+                </Grid>
+              </ControlTemplate>
+            </Setter.Value>
+          </Setter>
+        </Trigger>
+        <Trigger Property="Orientation" Value="Horizontal">
+          <Setter Property="Height" Value="8" />
+          <Setter Property="Template">
+            <Setter.Value>
+              <ControlTemplate TargetType="ScrollBar">
+                <Grid Background="Transparent">
+                  <Track x:Name="PART_Track" IsDirectionReversed="False">
+                    <Track.DecreaseRepeatButton>
+                      <RepeatButton Command="ScrollBar.PageLeftCommand" Opacity="0" Focusable="False" />
+                    </Track.DecreaseRepeatButton>
+                    <Track.Thumb>
+                      <Thumb Style="{StaticResource SoftScrollThumb}" />
+                    </Track.Thumb>
+                    <Track.IncreaseRepeatButton>
+                      <RepeatButton Command="ScrollBar.PageRightCommand" Opacity="0" Focusable="False" />
+                    </Track.IncreaseRepeatButton>
+                  </Track>
+                </Grid>
+              </ControlTemplate>
+            </Setter.Value>
+          </Setter>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
+    <!-- ============ 微信绿发送按钮（大圆角 + 悬停/按下/禁用三态） ============ -->
     <Style x:Key="WxSendButton" TargetType="Button">
       <Setter Property="Background" Value="#07C160" />
       <Setter Property="Foreground" Value="White" />
@@ -33,15 +105,26 @@
         <Setter.Value>
           <ControlTemplate TargetType="Button">
             <Border x:Name="Bd" Background="{TemplateBinding Background}"
-                    CornerRadius="4" Padding="{TemplateBinding Padding}">
+                    CornerRadius="8" Padding="{TemplateBinding Padding}"
+                    SnapsToDevicePixels="True">
+              <Border.Effect>
+                <DropShadowEffect BlurRadius="8" ShadowDepth="1" Direction="270"
+                                  Opacity="0.20" Color="#3E4550" />
+              </Border.Effect>
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
             </Border>
             <ControlTemplate.Triggers>
+              <!-- 悬停/按下用透明度变化：发送(绿)与停止(红)两种底色都适配 -->
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Bd" Property="Background" Value="#06AD56" />
+                <Setter TargetName="Bd" Property="Opacity" Value="0.86" />
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="Bd" Property="Opacity" Value="0.72" />
+                <Setter TargetName="Bd" Property="Effect" Value="{x:Null}" />
               </Trigger>
               <Trigger Property="IsEnabled" Value="False">
-                <Setter TargetName="Bd" Property="Background" Value="#A0DDB8" />
+                <Setter TargetName="Bd" Property="Opacity" Value="0.55" />
+                <Setter TargetName="Bd" Property="Effect" Value="{x:Null}" />
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -49,7 +132,7 @@
       </Setter>
     </Style>
 
-    <!-- 底部工具图标按钮 -->
+    <!-- ============ 工具图标按钮（圆形悬停光晕） ============ -->
     <Style x:Key="WxIconButton" TargetType="Button">
       <Setter Property="Background" Value="Transparent" />
       <Setter Property="BorderThickness" Value="0" />
@@ -57,17 +140,21 @@
       <Setter Property="Width" Value="36" />
       <Setter Property="Height" Value="36" />
       <Setter Property="FontSize" Value="18" />
-      <Setter Property="Foreground" Value="#191919" />
+      <Setter Property="Foreground" Value="#3E4550" />
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="6"
-                    Width="{TemplateBinding Width}" Height="{TemplateBinding Height}">
+            <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="18"
+                    Width="{TemplateBinding Width}" Height="{TemplateBinding Height}"
+                    SnapsToDevicePixels="True">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Bd" Property="Background" Value="#E5E5E5" />
+                <Setter TargetName="Bd" Property="Background" Value="#14000000" />
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#24000000" />
               </Trigger>
               <Trigger Property="IsEnabled" Value="False">
                 <Setter Property="Opacity" Value="0.45" />
@@ -78,14 +165,14 @@
       </Setter>
     </Style>
 
-    <!-- 快捷芯片（轻量） -->
+    <!-- ============ 快捷芯片（药丸形 + 轻阴影 + 悬停淡绿） ============ -->
     <Style x:Key="WxChip" TargetType="Button">
       <Setter Property="Background" Value="White" />
       <Setter Property="Foreground" Value="#576B95" />
-      <Setter Property="BorderBrush" Value="#E5E5E5" />
+      <Setter Property="BorderBrush" Value="#E3E8EF" />
       <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="Padding" Value="10,4" />
-      <Setter Property="Margin" Value="0,0,6,0" />
+      <Setter Property="Padding" Value="12,5" />
+      <Setter Property="Margin" Value="0,0,8,0" />
       <Setter Property="Cursor" Value="Hand" />
       <Setter Property="FontSize" Value="12" />
       <Setter Property="Template">
@@ -94,12 +181,59 @@
             <Border x:Name="Bd" Background="{TemplateBinding Background}"
                     BorderBrush="{TemplateBinding BorderBrush}"
                     BorderThickness="{TemplateBinding BorderThickness}"
-                    CornerRadius="14" Padding="{TemplateBinding Padding}">
+                    CornerRadius="16" Padding="{TemplateBinding Padding}"
+                    SnapsToDevicePixels="True">
+              <Border.Effect>
+                <DropShadowEffect BlurRadius="4" ShadowDepth="1" Direction="270"
+                                  Opacity="0.08" Color="#42506B" />
+              </Border.Effect>
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Bd" Property="Background" Value="#F5F5F5" />
+                <Setter TargetName="Bd" Property="Background" Value="#F0FBF4" />
+                <Setter TargetName="Bd" Property="BorderBrush" Value="#B9E7CC" />
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#E2F6E9" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- ============ 圆角勾选框（微信绿对勾） ============ -->
+    <Style x:Key="WxCheck" TargetType="CheckBox">
+      <Setter Property="Foreground" Value="#576B95" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <StackPanel Orientation="Horizontal">
+              <Border x:Name="Box" Width="16" Height="16" CornerRadius="5"
+                      BorderBrush="#C3CAD6" BorderThickness="1.5" Background="White"
+                      SnapsToDevicePixels="True">
+                <Path x:Name="Tick" Data="M 3.2,8.4 L 6.8,11.8 L 12.8,4.6" Stroke="White"
+                      StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                      Visibility="Collapsed" Stretch="None"
+                      HorizontalAlignment="Center" VerticalAlignment="Center" />
+              </Border>
+              <ContentPresenter Margin="6,0,0,0" VerticalAlignment="Center" />
+            </StackPanel>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="Box" Property="Background" Value="#07C160" />
+                <Setter TargetName="Box" Property="BorderBrush" Value="#07C160" />
+                <Setter TargetName="Tick" Property="Visibility" Value="Visible" />
+              </Trigger>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Box" Property="BorderBrush" Value="#07C160" />
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.5" />
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -108,7 +242,7 @@
     </Style>
   </Window.Resources>
 
-  <Border BorderBrush="#D9D9D9" BorderThickness="1" Background="#EDEDED">
+  <Border BorderBrush="#D8DEE6" BorderThickness="1" Background="#F3F5F8">
     <Grid>
       <Grid.RowDefinitions>
         <!-- 顶栏 -->
@@ -125,20 +259,29 @@
 
       <!-- 拖入文件时的全窗提示层（盖在内容上，不拦截布局） -->
       <Border x:Name="DropOverlay" Grid.Row="0" Grid.RowSpan="5"
-              Background="#CC07C160" Visibility="Collapsed" IsHitTestVisible="False"
+              Background="#E807C160" Visibility="Collapsed" IsHitTestVisible="False"
               Panel.ZIndex="100">
-        <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
-          <TextBlock Text="松开即可添加附件" FontSize="20" FontWeight="SemiBold"
-                     Foreground="White" HorizontalAlignment="Center" />
-          <TextBlock Text="支持资源管理器 / 微信拖图 · 最多 6 个 · 单文件 ≤8MB"
-                     FontSize="13" Foreground="#F0FFF6" HorizontalAlignment="Center" Margin="0,8,0,0" />
-        </StackPanel>
+        <Border Background="#F2FFFFFF" CornerRadius="18" Padding="34,26"
+                BorderBrush="White" BorderThickness="2"
+                VerticalAlignment="Center" HorizontalAlignment="Center">
+          <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+            <TextBlock Text="📎" FontSize="30" HorizontalAlignment="Center" />
+            <TextBlock Text="松开即可添加附件" FontSize="19" FontWeight="SemiBold"
+                       Foreground="#078A48" HorizontalAlignment="Center" Margin="0,8,0,0" />
+            <TextBlock Text="支持资源管理器 / 微信拖图 · 最多 6 个 · 单文件 ≤8MB"
+                       FontSize="12.5" Foreground="#3E9C69" HorizontalAlignment="Center" Margin="0,7,0,0" />
+          </StackPanel>
+        </Border>
       </Border>
 
-      <!-- ========== 顶栏：拖动 + 标题 ========== -->
-      <Border Grid.Row="0" Background="#EDEDED" BorderBrush="#D9D9D9" BorderThickness="0,0,0,1"
+      <!-- ========== 顶栏：白色 + 拖动 + 标题 ========== -->
+      <Border Grid.Row="0" Background="White" BorderBrush="#E6E9EF" BorderThickness="0,0,0,1"
               MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
-        <Grid Height="48" Margin="8,0">
+        <Border.Effect>
+          <DropShadowEffect BlurRadius="6" ShadowDepth="1" Direction="270"
+                            Opacity="0.05" Color="#1B2430" />
+        </Border.Effect>
+        <Grid Height="50" Margin="8,0">
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="Auto" />
             <ColumnDefinition Width="*" />
@@ -150,9 +293,12 @@
 
           <StackPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Center">
             <TextBlock x:Name="TitleText" Text="小申" FontSize="16" FontWeight="SemiBold"
-                       Foreground="#191919" HorizontalAlignment="Center" />
-            <TextBlock x:Name="StatusText" Text="在线" FontSize="11" Foreground="#B2B2B2"
-                       HorizontalAlignment="Center" Margin="0,1,0,0" />
+                       Foreground="#1A1A1A" HorizontalAlignment="Center" />
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,2,0,0">
+              <!-- 在线状态小绿点，配合状态文字 -->
+              <Ellipse Width="6" Height="6" Fill="#07C160" VerticalAlignment="Center" Margin="0,0,4,0" />
+              <TextBlock x:Name="StatusText" Text="在线" FontSize="11" Foreground="#98A1AD" />
+            </StackPanel>
           </StackPanel>
 
           <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
@@ -174,19 +320,25 @@
         </Grid>
       </Border>
 
-      <!-- ========== 消息列表 ========== -->
-      <Border Grid.Row="1" Background="#EDEDED">
+      <!-- ========== 消息列表：柔光渐变底 ========== -->
+      <Border Grid.Row="1">
+        <Border.Background>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Color="#FAFBFD" Offset="0" />
+            <GradientStop Color="#F2F4F8" Offset="1" />
+          </LinearGradientBrush>
+        </Border.Background>
         <ScrollViewer x:Name="ChatScroll"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled"
-                      Padding="0,8,0,4">
-          <StackPanel x:Name="ChatPanel" Margin="10,0,10,8" />
+                      Padding="0,10,0,4">
+          <StackPanel x:Name="ChatPanel" Margin="12,0,12,10" />
         </ScrollViewer>
       </Border>
 
       <!-- ========== 快捷芯片 ========== -->
       <ScrollViewer Grid.Row="2" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
-                    Background="#EDEDED" Padding="10,0,10,6">
+                    Background="#F3F5F8" Padding="12,2,12,8">
         <StackPanel Orientation="Horizontal">
           <Button Content="看桌面" Style="{StaticResource WxChip}" Click="LookDesktop_Click" />
           <Button Content="天气预警" Style="{StaticResource WxChip}" Click="QuickChip_Click" Tag="帮我查当前位置天气，重点说高温和降水预警" />
@@ -207,21 +359,21 @@
       </ScrollViewer>
 
       <!-- ========== 待发送附件预览 ========== -->
-      <Border x:Name="AttachBar" Grid.Row="3" Background="#F7F7F7" BorderBrush="#E5E5E5"
-              BorderThickness="0,1,0,0" Visibility="Collapsed" Padding="10,8">
+      <Border x:Name="AttachBar" Grid.Row="3" Background="White" BorderBrush="#E6E9EF"
+              BorderThickness="0,1,0,0" Visibility="Collapsed" Padding="12,9">
         <DockPanel>
           <Button DockPanel.Dock="Right" Content="清除" Style="{StaticResource WxChip}"
                   Margin="8,0,0,0" Click="ClearAttachments_Click" />
           <StackPanel>
-            <TextBlock Text="待发送附件" FontSize="11" Foreground="#888" Margin="0,0,0,4" />
+            <TextBlock Text="待发送附件" FontSize="11" Foreground="#98A1AD" Margin="0,0,0,4" />
             <WrapPanel x:Name="AttachPreviewPanel" />
           </StackPanel>
         </DockPanel>
       </Border>
 
-      <!-- ========== 输入区（仿微信） ========== -->
-      <Border Grid.Row="4" Background="#F7F7F7" BorderBrush="#D9D9D9" BorderThickness="0,1,0,0">
-        <Grid Margin="8,8,8,10">
+      <!-- ========== 输入区（仿微信 · 白底） ========== -->
+      <Border Grid.Row="4" Background="White" BorderBrush="#E6E9EF" BorderThickness="0,1,0,0">
+        <Grid Margin="10,9,10,12">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -229,7 +381,7 @@
           </Grid.RowDefinitions>
 
           <!-- 工具行：+ 附件 / 语音 / 看桌面勾选 -->
-          <DockPanel Grid.Row="0" Margin="0,0,0,6">
+          <DockPanel Grid.Row="0" Margin="0,0,0,7">
             <Button x:Name="AttachButton" DockPanel.Dock="Left" Content="＋" FontSize="20"
                     Style="{StaticResource WxIconButton}"
                     ToolTip="上传图片 / 文件（也可拖入窗口，或 Ctrl+V 粘贴）"
@@ -240,16 +392,28 @@
                     AutomationProperties.Name="语音输入"
                     Click="VoiceButton_Click" Margin="2,0,0,0" />
             <CheckBox x:Name="DesktopCheck" Content="附带桌面截图" IsChecked="False"
-                      Foreground="#576B95" FontSize="12" VerticalAlignment="Center"
-                      Margin="6,0,0,0" />
+                      Style="{StaticResource WxCheck}"
+                      Margin="8,0,0,0" />
             <TextBlock DockPanel.Dock="Right" Text="拖文件 / Ctrl+V · Enter 发送"
-                       FontSize="11" Foreground="#B2B2B2" VerticalAlignment="Center"
+                       FontSize="11" Foreground="#B7BEC9" VerticalAlignment="Center"
                        HorizontalAlignment="Right" />
           </DockPanel>
 
-          <!-- 输入框 -->
-          <Border Grid.Row="1" Background="White" CornerRadius="4" BorderBrush="#E5E5E5"
-                  BorderThickness="1" Padding="2">
+          <!-- 输入框：圆角白卡，聚焦时描边变绿 -->
+          <Border Grid.Row="1" Background="#F7F8FA" CornerRadius="10"
+                  BorderThickness="1.5" Padding="2"
+                  SnapsToDevicePixels="True">
+            <Border.Style>
+              <Style TargetType="Border">
+                <Setter Property="BorderBrush" Value="#E4E8EF" />
+                <Style.Triggers>
+                  <DataTrigger Binding="{Binding IsKeyboardFocused, ElementName=InputBox}" Value="True">
+                    <Setter Property="BorderBrush" Value="#07C160" />
+                    <Setter Property="Background" Value="White" />
+                  </DataTrigger>
+                </Style.Triggers>
+              </Style>
+            </Border.Style>
             <TextBox x:Name="InputBox"
                      MaxLength="4000"
                      MinHeight="56"
@@ -259,21 +423,22 @@
                      VerticalScrollBarVisibility="Auto"
                      BorderThickness="0"
                      Background="Transparent"
-                     Padding="8,8"
+                     Padding="10,9"
                      FontSize="14"
-                     Foreground="#191919"
+                     Foreground="#1A1A1A"
                      CaretBrush="#07C160"
+                     SelectionBrush="#B9E7CC"
                      AllowDrop="False"
                      PreviewKeyDown="InputBox_PreviewKeyDown" />
           </Border>
 
           <!-- 发送 -->
-          <DockPanel Grid.Row="2" Margin="0,8,0,0">
+          <DockPanel Grid.Row="2" Margin="0,9,0,0">
             <Button x:Name="SendButton" DockPanel.Dock="Right" Content="发送"
                     Style="{StaticResource WxSendButton}"
-                    MinWidth="72" Height="34"
+                    MinWidth="76" Height="34"
                     Click="SendButton_Click" />
-            <TextBlock x:Name="TypingHint" Text="" FontSize="11" Foreground="#B2B2B2"
+            <TextBlock x:Name="TypingHint" Text="" FontSize="11" Foreground="#98A1AD"
                        VerticalAlignment="Center" />
           </DockPanel>
         </Grid>

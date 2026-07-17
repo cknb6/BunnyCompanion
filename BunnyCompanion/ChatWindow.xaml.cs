@@ -727,14 +727,23 @@ public partial class ChatWindow : Window
         AttachBar.Visibility = Visibility.Visible;
         foreach (var item in _pending)
         {
+            // 附件小药丸：圆角更大 + 轻投影，和整体风格统一
             var chip = new Border
             {
                 Background = ColorBrush("#FFFFFF"),
-                BorderBrush = ColorBrush("#E5E5E5"),
+                BorderBrush = ColorBrush("#E3E8EF"),
                 BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(6),
-                Padding = new Thickness(8, 5, 8, 5),
+                CornerRadius = new CornerRadius(14),
+                Padding = new Thickness(10, 5, 10, 5),
                 Margin = new Thickness(0, 0, 6, 4),
+                Effect = new System.Windows.Media.Effects.DropShadowEffect
+                {
+                    BlurRadius = 4,
+                    ShadowDepth = 1,
+                    Direction = 270,
+                    Opacity = 0.08,
+                    Color = System.Windows.Media.Color.FromRgb(0x42, 0x50, 0x6B),
+                },
             };
             var sizeKb = Math.Max(1, item.SizeBytes / 1024);
             var label = item.Kind switch
@@ -1040,27 +1049,42 @@ public partial class ChatWindow : Window
         if (!force && (now - _lastTimeStampShown).TotalMinutes < 4)
             return;
         _lastTimeStampShown = now;
-        ChatPanel.Children.Add(new TextBlock
+        // 时间戳胶囊：弱化存在感但不丢失
+        ChatPanel.Children.Add(new Border
         {
-            Text = now.ToString("HH:mm"),
-            FontSize = 11,
-            Foreground = ColorBrush("#B2B2B2"),
+            Background = ColorBrush("#E9ECF1"),
+            CornerRadius = new CornerRadius(9),
+            Padding = new Thickness(10, 2.5, 10, 2.5),
             HorizontalAlignment = HorizontalAlignment.Center,
             Margin = new Thickness(0, 6, 0, 10),
+            Child = new TextBlock
+            {
+                Text = now.ToString("HH:mm"),
+                FontSize = 11,
+                Foreground = ColorBrush("#98A1AD"),
+            },
         });
     }
 
     private void AppendSystemTip(string text)
     {
-        ChatPanel.Children.Add(new TextBlock
+        // 系统提示做成居中灰胶囊，与聊天气泡区分层级
+        ChatPanel.Children.Add(new Border
         {
-            Text = text,
-            FontSize = 11.5,
-            Foreground = ColorBrush("#B2B2B2"),
-            TextWrapping = TextWrapping.Wrap,
+            Background = ColorBrush("#E9ECF1"),
+            CornerRadius = new CornerRadius(10),
+            Padding = new Thickness(12, 4, 12, 4),
             HorizontalAlignment = HorizontalAlignment.Center,
             Margin = new Thickness(20, 4, 20, 8),
-            TextAlignment = TextAlignment.Center,
+            MaxWidth = 340,
+            Child = new TextBlock
+            {
+                Text = text,
+                FontSize = 11.5,
+                Foreground = ColorBrush("#8A93A0"),
+                TextWrapping = TextWrapping.Wrap,
+                TextAlignment = TextAlignment.Center,
+            },
         });
         ScrollToEnd();
     }
@@ -1135,11 +1159,19 @@ public partial class ChatWindow : Window
             var frame = new Border
             {
                 Child = image,
-                CornerRadius = new CornerRadius(4),
-                BorderBrush = ColorBrush("#D9D9D9"),
+                CornerRadius = new CornerRadius(10),
+                BorderBrush = ColorBrush("#E3E8EF"),
                 BorderThickness = new Thickness(1),
                 Background = ColorBrush("#FFFFFF"),
-                Padding = new Thickness(2),
+                Padding = new Thickness(3),
+                Effect = new System.Windows.Media.Effects.DropShadowEffect
+                {
+                    BlurRadius = 6,
+                    ShadowDepth = 1,
+                    Direction = 270,
+                    Opacity = 0.10,
+                    Color = System.Windows.Media.Color.FromRgb(0x1B, 0x24, 0x30),
+                },
             };
 
             if (isPet)
@@ -1218,10 +1250,18 @@ public partial class ChatWindow : Window
             Height = 42,
             CornerRadius = new CornerRadius(21),
             Background = isPet ? ColorBrush("#FFE8F0") : ColorBrush("#E8FFE8"),
-            BorderBrush = isPet ? ColorBrush("#FFB6C8") : ColorBrush("#07C160"),
+            BorderBrush = isPet ? ColorBrush("#FFD3E1") : ColorBrush("#7ED957"),
             BorderThickness = new Thickness(1.5),
             VerticalAlignment = VerticalAlignment.Top,
             ClipToBounds = true,
+            Effect = new System.Windows.Media.Effects.DropShadowEffect
+            {
+                BlurRadius = 5,
+                ShadowDepth = 1,
+                Direction = 270,
+                Opacity = 0.12,
+                Color = System.Windows.Media.Color.FromRgb(0x1B, 0x24, 0x30),
+            },
             Child = img,
             ToolTip = isPet
                 ? (string.IsNullOrWhiteSpace(name) ? "小申" : name)
@@ -1311,17 +1351,28 @@ public partial class ChatWindow : Window
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
         };
 
-        return new Border
+        // 气泡卡片：大圆角 + 轻微投影，对方白卡 / 自己微信绿
+        var bubble = new Border
         {
             Background = isPet ? ColorBrush("#FFFFFF") : ColorBrush("#95EC69"),
-            CornerRadius = new CornerRadius(4),
-            Padding = new Thickness(10, 8, 10, 8),
-            // 轻微阴影感用边框模拟
-            BorderBrush = isPet ? ColorBrush("#E5E5E5") : ColorBrush("#8DE06A"),
+            CornerRadius = new CornerRadius(12),
+            Padding = new Thickness(12, 9, 12, 9),
+            BorderBrush = isPet ? ColorBrush("#ECEFF3") : ColorBrush("#8DE06A"),
             BorderThickness = new Thickness(isPet ? 1 : 0),
             Child = body,
             // 限制最大宽度由外部设置
         };
+        bubble.Effect = new System.Windows.Media.Effects.DropShadowEffect
+        {
+            BlurRadius = 6,
+            ShadowDepth = 1,
+            Direction = 270,
+            Opacity = 0.08,
+            Color = isPet
+                ? System.Windows.Media.Color.FromRgb(0x1B, 0x24, 0x30)
+                : System.Windows.Media.Color.FromRgb(0x3E, 0x8E, 0x41),
+        };
+        return bubble;
     }
 
     private void ScrollToEnd()
