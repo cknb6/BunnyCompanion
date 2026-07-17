@@ -647,10 +647,10 @@ void Fail(string msg)
     var cfgPath2 = Path.Combine(repoRoot, "BunnyCompanion", "Services", "AiConfig.cs");
     var cfg2 = File.Exists(cfgPath2) ? File.ReadAllText(cfgPath2) : "";
     if (!cfg2.Contains("OfficeEmptyAfterToolsRetries", StringComparison.Ordinal)
-        || !cfg2.Contains("StepOfficeEffort = \"low\"", StringComparison.Ordinal))
-        Fail("AiConfig 办公 low effort / 空 content 重试配置缺失");
+        || !cfg2.Contains("StepOfficeEffort = \"medium\"", StringComparison.Ordinal))
+        Fail("AiConfig 办公 medium effort / 空 content 重试配置缺失");
     else
-        Ok("办公配置 low effort + 空 content 重试 OK");
+        Ok("办公配置 medium effort + 空 content 重试 OK");
 
     File.WriteAllText(Path.Combine(scratch, "office_plan.txt"), st + "\n---\n" + set + "\n");
 }
