@@ -79,9 +79,11 @@ internal static class AiConfig
     public const int StepOfficeMinMaxTokens = 1600;
     public const int StepOfficeTimeoutSeconds = 90;
     /// <summary>
-    /// 办公用 low：medium 时 step 易把 token 吃进 reasoning，工具跑完后空 content 整链失败。
+    /// 办公用 medium：阶跃官方文档明确 medium 是多步骤任务推荐档位（规划→工具→校验→交付），
+    /// low 仅适合简单问答/摘要，会导致模型不主动规划、不调工具，工具链跑不通。
+    /// 空兜底已覆盖：3600 max_tokens + 3 次空 content 重试 + 本地拼装。
     /// </summary>
-    public const string StepOfficeEffort = "low";
+    public const string StepOfficeEffort = "medium";
     /// <summary>工具跑完后 content 仍空时，办公模式最多再催几轮总结。</summary>
     public const int OfficeEmptyAfterToolsRetries = 3;
 }

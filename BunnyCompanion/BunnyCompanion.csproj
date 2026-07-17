@@ -36,4 +36,9 @@
     <Resource Include="Assets\Avatars\*.png" />
     <Resource Include="Assets\BunnyCompanion.ico" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- AngleSharp：高质量 HTML DOM 解析，用于网页正文与搜索结果提取，替代正则 -->
+    <PackageReference Include="AngleSharp" Version="1.0.0" />
+  </ItemGroup>
 </Project>

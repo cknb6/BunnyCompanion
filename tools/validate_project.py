@@ -147,7 +147,12 @@ def validate_portability() -> None:
         if setting not in project_text:
             fail(f"项目缺少发布设置：{setting}")
     if "<PackageReference" in project_text:
-        fail("项目不应依赖外部 NuGet 包")
+        # 唯一审核通过的外部依赖：AngleSharp（高质量 HTML DOM 解析，用于网页正文与搜索结果提取）
+        refs = re.findall(r'<PackageReference\s+Include="([^"]+)"', project_text)
+        allowed = {"AngleSharp"}
+        disallowed = [r for r in refs if r not in allowed]
+        if disallowed:
+            fail(f"项目包含未审核的外部 NuGet 包：{', '.join(disallowed)}（仅允许：AngleSharp）")
 
 
 def validate_public_tree() -> None:

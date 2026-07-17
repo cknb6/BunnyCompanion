@@ -131,6 +131,25 @@ public partial class SettingsWindow : Window
             .ToList();
         _settings.Normalize();
 
+        // 立即应用开机启动设置（原本要等下次程序启动才写注册表，用户改完开关可能以为没生效）
+        try
+        {
+            var wantStartup = _settings.StartWithWindows;
+            StartupService.SetEnabled(wantStartup);
+            if (wantStartup)
+            {
+                var diag = StartupService.Diagnose();
+                if (!diag.Enabled || diag.DisabledByApprover || !diag.RunPathMatchesCurrent)
+                {
+                    MessageBox.Show(diag.Summary, "开机启动状态", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+            }
+        }
+        catch
+        {
+            // 诊断失败不阻塞保存
+        }
+
         DialogResult = true;
     }
 

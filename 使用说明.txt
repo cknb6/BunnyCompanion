@@ -74,6 +74,7 @@ https://github.com/cknb6/BunnyCompanion/releases 手动下载覆盖安装。
 设置中开启「自动检查更新」（默认开）：
 - 启动约 15 秒后首次检测，之后**每 5 分钟**后台检测一次
 - 发现新版本：自动下载 → SHA256 校验 → **覆盖当前 EXE 并重启**（无需手动点）
+- **升级只替换 EXE，本地数据完整保留**：设置、爱心值、长期记忆（agent.md / companion_memory.json）、技能、备忘录都不会丢，升级后无需重新配置
 托盘「检查更新…」可立即手动检测（会弹出确认框）。
 更新源仅限 GitHub：https://github.com/cknb6/BunnyCompanion/releases
 流程：读 latest → 下对应架构 EXE + checksums.txt → 哈希不一致则拒绝并删临时文件。
